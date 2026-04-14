@@ -161,5 +161,5 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 if __name__ == "__main__":
     import uvicorn
     host = os.environ.get("AL3X_HOST", "0.0.0.0")
-    port = int(os.environ.get("AL3X_PORT", "8080"))
+    port = int(os.environ.get("AL3X_PORT", "8090"))
     uvicorn.run("app:app", host=host, port=port, reload=False, log_level="info")

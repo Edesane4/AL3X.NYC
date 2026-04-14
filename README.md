@@ -30,7 +30,7 @@ cp .env.example .env     # fill in TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
 python app.py
 ```
 
-Open <http://localhost:8080> for the dashboard.
+Open <http://localhost:8090> for the dashboard.
 
 ### Telegram setup
 
