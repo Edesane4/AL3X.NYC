@@ -252,22 +252,89 @@ class DataSources:
             return []
 
     # ---- GFS-MOS / NAM-MOS ---------------------------------------------
-    async def mos(self, product_url: str, source_name: str,
+    #
+    # The MOS text bulletins we need are published to NOAA's operational FTP
+    # server over HTTPS as full national MAV (GFS) and MET (NAM) files, one
+    # per model cycle (00Z / 06Z / 12Z / 18Z). We download the most recent
+    # available cycle, cache the raw text in-process until the next cycle,
+    # and parse the KNYC block out of it.
+    async def _fetch_mos_bulletin(self, url_template: str,
+                                   source_name: str) -> Optional[str]:
+        """Return the full MOS bulletin text for the most recently posted
+        cycle. Tries the latest cycle and steps backward up to 36 hours if
+        it isn't posted yet. Caches per cycle so intraday cycles reuse
+        the same in-memory copy.
+        """
+        cache = getattr(self, "_mos_cache", None)
+        if cache is None:
+            cache: Dict[str, Dict[str, Any]] = {}
+            self._mos_cache = cache
+
+        now_utc = datetime.utcnow()
+        # MOS posts ~35 minutes after the run. Pick the latest cycle whose
+        # posting window has elapsed.
+        # cycles per day: 00, 06, 12, 18
+        tried: List[Tuple[str, str]] = []
+        for h_back in range(0, 37, 1):   # look back 0..36 hours
+            t = now_utc - timedelta(hours=h_back)
+            cycle_hour = (t.hour // 6) * 6
+            # skip if this cycle hasn't finished posting yet
+            if cycle_hour == t.hour and t.minute < 40:
+                continue
+            cycle_dt = t.replace(hour=cycle_hour, minute=0, second=0,
+                                 microsecond=0)
+            # don't try a cycle that is in the future
+            if cycle_dt > now_utc:
+                continue
+            date_s = cycle_dt.strftime("%Y%m%d")
+            cycle_s = f"{cycle_hour:02d}"
+            key = f"{source_name}:{date_s}:{cycle_s}"
+            if (date_s, cycle_s) in tried:
+                continue
+            tried.append((date_s, cycle_s))
+            if key in cache:
+                return cache[key].get("text")
+
+            url = url_template.format(date=date_s, cycle=cycle_s)
+            try:
+                r = await self._client.get(url, timeout=15.0)
+                if r.status_code == 200 and len(r.text) > 1000:
+                    # Success — cache it. Also drop old cache entries for
+                    # the same source_name to keep memory bounded.
+                    stale = [k for k in cache
+                             if k.startswith(f"{source_name}:") and k != key]
+                    for k in stale:
+                        cache.pop(k, None)
+                    cache[key] = {"text": r.text, "bytes": len(r.text),
+                                  "url": url}
+                    log.info("%s cycle %s/%sZ fetched (%d KB)",
+                             source_name, date_s, cycle_s, len(r.text) // 1024)
+                    return r.text
+                # 404 = cycle not yet posted; try an earlier cycle
+                log.debug("%s %s/%sZ not posted yet (HTTP %s)",
+                          source_name, date_s, cycle_s, r.status_code)
+            except Exception as e:  # noqa: BLE001
+                log.info("%s %s/%sZ fetch error (%s): %s",
+                         source_name, date_s, cycle_s,
+                         type(e).__name__, str(e) or type(e).__name__)
+                # If the connection itself is broken don't hammer further
+                if h_back >= 12:
+                    break
+        return None
+
+    async def mos(self, url_template: str, source_name: str,
                   target_date: date) -> SourceResult:
         try:
-            r = await self._client.get(
-                product_url,
-                params={"stationId": cfg.STATION_ID},
-                timeout=5.0,
-            )
-            r.raise_for_status()
-            txt = r.text
+            txt = await self._fetch_mos_bulletin(url_template, source_name)
+            if not txt:
+                return SourceResult(source_name, error="no bulletin fetched")
             val = _parse_mos_max(txt, target_date)
             if val is None:
-                log.info("%s: endpoint responded but no X/N parsed "
-                         "(%d bytes)", source_name, len(txt))
+                log.info("%s: bulletin parsed but no X/N for target date",
+                         source_name)
                 return SourceResult(source_name, error="no max field parsed")
-            return SourceResult(source_name, value=val, meta={"raw_len": len(txt)})
+            return SourceResult(source_name, value=val,
+                                meta={"raw_len": len(txt)})
         except Exception as e:  # noqa: BLE001
             msg = str(e) or type(e).__name__
             log.info("%s fetch skipped (%s): %s",
@@ -275,10 +342,12 @@ class DataSources:
             return SourceResult(source_name, error=f"{type(e).__name__}: {msg}")
 
     async def gfs_mos(self, target_date: date) -> SourceResult:
-        return await self.mos(cfg.MDL_MOS, "gfs_mos", target_date)
+        return await self.mos(cfg.GFS_MOS_URL_TEMPLATE,
+                              "gfs_mos", target_date)
 
     async def nam_mos(self, target_date: date) -> SourceResult:
-        return await self.mos(cfg.MDL_NAMMOS, "nam_mos", target_date)
+        return await self.mos(cfg.NAM_MOS_URL_TEMPLATE,
+                              "nam_mos", target_date)
 
     # ---- Open-Meteo: HRRR + ECMWF --------------------------------------
     async def open_meteo(self, target_date: date, model: str,
@@ -464,24 +533,107 @@ def _insert_grid_series(out: Dict[str, Dict[str, Any]],
         slot[key] = v
 
 
+_MONTH_ABBR = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _extract_knyc_block(text: str) -> Optional[str]:
+    """Pull the KNYC section from a national MAV/MET text bulletin.
+
+    MAV/MET format: each station's block starts with a line whose first token
+    is the ICAO identifier (e.g. `KNYC   GFS MOS GUIDANCE   4/14/2026  1200 UTC`)
+    and runs until the next station header.
+    """
+    start = None
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(f"{cfg.STATION_ID} ") and "MOS GUIDANCE" in stripped:
+            start = i
+            break
+    if start is None:
+        return None
+    # Find the next station header (4-letter ICAO + "MOS GUIDANCE")
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        s = lines[j].strip()
+        if "MOS GUIDANCE" in s and re.match(r"^[A-Z0-9]{4}\s", s):
+            end = j
+            break
+    return "\n".join(lines[start:end])
+
+
 def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
+    """Parse a MAV/MET national bulletin (or KNYC-only text) to find the
+    daily max temperature valid for ``target_date``.
+
+    Robust approach: anchor by character position, not fixed column width.
+      1. Extract the KNYC block.
+      2. On the DT line, record each `/MON DD` token's start column.
+      3. On the X/N line, record each numeric token's start column.
+      4. For each X/N token, its date = the most recent DT token at
+         or before this column's position.
+      5. Return max of X/N values assigned to target_date.day (prefers
+         maxima over minima when both fall on the same day).
+    """
     try:
-        m = re.search(rf"{cfg.STATION_ID}[^\n]*(?:\n.+){{0,40}}", text)
-        block = m.group(0) if m else text
-        dt_line = re.search(r"^\s*DT\s+([^\n]+)$", block, re.MULTILINE)
-        xn_line = re.search(r"^\s*X/N\s+([^\n]+)$", block, re.MULTILINE)
+        block = _extract_knyc_block(text) or text
+        lines = block.splitlines()
+        dt_line = None
+        xn_line = None
+        for ln in lines:
+            s = ln.lstrip()
+            if dt_line is None and s.startswith("DT "):
+                dt_line = ln
+            elif xn_line is None and s.startswith("X/N "):
+                xn_line = ln
+            if dt_line and xn_line:
+                break
         if not xn_line:
             return None
-        xn_values = re.findall(r"-?\d+", xn_line.group(1))
-        if not xn_values:
-            return None
+
+        # Locate each /MON DD token on DT line
+        dt_tokens: List[Tuple[int, int]] = []  # (col, day)
         if dt_line:
-            dt_tokens = dt_line.group(1).split()
-            target_day = target_date.strftime("%d")
-            for tok, v in zip(dt_tokens, xn_values):
-                if target_day in tok:
-                    return float(v)
-        return float(xn_values[0])
+            for m in re.finditer(r"/([A-Z]{3})\s+(\d{1,2})", dt_line):
+                dt_tokens.append((m.start(), int(m.group(2))))
+
+        # Locate each numeric on X/N line (skip the "X/N" label itself)
+        xn_body_start = xn_line.lstrip().find("X/N") + len("X/N")
+        xn_numbers: List[Tuple[int, int]] = []  # (col, value)
+        for m in re.finditer(r"-?\d+", xn_line):
+            if m.start() < len(xn_line) - len(xn_line.lstrip()) + xn_body_start:
+                continue  # inside the "X/N" label — skip
+            try:
+                xn_numbers.append((m.start(), int(m.group(0))))
+            except ValueError:
+                continue
+
+        if not xn_numbers:
+            return None
+
+        # Assign each X/N number to the day of the most recent DT token
+        # whose column is <= this number's column.
+        def _day_for(col: int) -> Optional[int]:
+            day = None
+            for tcol, d in dt_tokens:
+                if tcol <= col:
+                    day = d
+                else:
+                    break
+            return day
+
+        candidates: List[int] = []
+        for col, v in xn_numbers:
+            if _day_for(col) == target_date.day:
+                candidates.append(v)
+        if candidates:
+            return float(max(candidates))
+
+        # Fallback: the first X/N value (earliest period in the bulletin)
+        return float(xn_numbers[0][1])
     except Exception as e:  # noqa: BLE001
         log.debug("mos parse error: %s", e)
         return None
