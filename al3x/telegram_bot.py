@@ -27,12 +27,37 @@ class TelegramNotifier:
         self._client = httpx.AsyncClient(timeout=15.0)
         self._queue: asyncio.Queue[str] = asyncio.Queue(maxsize=500)
         self._worker_task: Optional[asyncio.Task] = None
+        # Circuit breaker: disable sending after repeated auth failures so we
+        # don't spin into a feedback loop with the logging handler.
+        self._disabled_reason: Optional[str] = None
+        self._consecutive_fail = 0
 
     @property
     def configured(self) -> bool:
-        return bool(self.token and self.chat_id)
+        return bool(self.token and self.chat_id
+                    and self._disabled_reason is None)
 
     async def start(self) -> None:
+        if not (self.token and self.chat_id):
+            return
+        # Verify token with getMe before starting the worker so a bad token
+        # is caught immediately — no retry spam.
+        try:
+            r = await self._client.get(
+                f"{self.API}/bot{self.token}/getMe", timeout=10,
+            )
+            if r.status_code == 401:
+                self._disabled_reason = "401 Unauthorized (bad token)"
+                log.warning("Telegram disabled: %s", self._disabled_reason)
+                return
+            if r.status_code >= 400:
+                self._disabled_reason = f"{r.status_code} on getMe"
+                log.warning("Telegram disabled: %s", self._disabled_reason)
+                return
+        except Exception as e:  # noqa: BLE001
+            self._disabled_reason = f"getMe failed: {e}"
+            log.warning("Telegram disabled: %s", self._disabled_reason)
+            return
         if self._worker_task is None:
             self._worker_task = asyncio.create_task(self._worker())
 
@@ -68,9 +93,26 @@ class TelegramNotifier:
                         "disable_web_page_preview": True,
                     },
                 )
+                if r.status_code == 401:
+                    # Definitively bad creds — disable permanently this session
+                    self._disabled_reason = "401 Unauthorized during send"
+                    log.warning("Telegram disabled: bad token (401). "
+                                "No further messages will be attempted.")
+                    return
                 if r.status_code >= 400:
-                    log.warning("telegram error %s: %s", r.status_code, r.text[:200])
+                    self._consecutive_fail += 1
+                    if self._consecutive_fail >= 5:
+                        self._disabled_reason = (
+                            f"{self._consecutive_fail} consecutive failures"
+                        )
+                        log.warning("Telegram disabled after repeated failures.")
+                        return
+                    log.warning("telegram error %s: %s",
+                                r.status_code, r.text[:200])
+                else:
+                    self._consecutive_fail = 0
             except Exception as e:  # noqa: BLE001
+                self._consecutive_fail += 1
                 log.warning("telegram send failed: %s", e)
 
     async def _worker(self) -> None:
@@ -102,6 +144,15 @@ class TelegramLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
+            # Break the feedback loop: never forward logs that came from the
+            # Telegram subsystem itself, or from httpx (which logs every
+            # outgoing request, including ours to api.telegram.org).
+            if (record.name.startswith("al3x.telegram")
+                    or record.name == "httpx"
+                    or record.name.startswith("httpcore")):
+                return
+            if not self.notifier.configured:
+                return
             msg = self.format(record)
             icon = {"WARNING": "⚠️", "ERROR": "🛑",
                     "CRITICAL": "🚨"}.get(record.levelname, "ℹ️")

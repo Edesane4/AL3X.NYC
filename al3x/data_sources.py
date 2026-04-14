@@ -54,14 +54,34 @@ class DataSources:
                      "Accept": "application/geo+json, application/json, text/html"},
             follow_redirects=True,
         )
+        self._points_cache: Optional[Dict[str, str]] = None
 
     async def close(self) -> None:
         await self._client.aclose()
 
+    async def _nws_endpoints(self) -> Dict[str, str]:
+        """Resolve the dynamic /points/{lat},{lon} endpoint (once)."""
+        if self._points_cache:
+            return self._points_cache
+        url = f"https://api.weather.gov/points/{cfg.LAT},{cfg.LON}"
+        r = await self._client.get(url)
+        r.raise_for_status()
+        props = r.json().get("properties", {})
+        self._points_cache = {
+            "forecast": props.get("forecast"),
+            "forecastHourly": props.get("forecastHourly"),
+            "forecastGridData": props.get("forecastGridData"),
+        }
+        return self._points_cache
+
     # ---- NWS point forecast (hourly) ------------------------------------
     async def nws_hourly_max(self, target_date: date) -> SourceResult:
         try:
-            r = await self._client.get(cfg.NWS_POINT_HOURLY)
+            ep = await self._nws_endpoints()
+            if not ep.get("forecastHourly"):
+                return SourceResult("nws_point",
+                                    error="no forecastHourly url from /points")
+            r = await self._client.get(ep["forecastHourly"])
             r.raise_for_status()
             js = r.json()
             periods = js.get("properties", {}).get("periods", [])
@@ -98,7 +118,10 @@ class DataSources:
     # ---- NWS / NBM daily ------------------------------------------------
     async def nws_daily_max(self, target_date: date) -> SourceResult:
         try:
-            r = await self._client.get(cfg.NWS_POINT_DAILY)
+            ep = await self._nws_endpoints()
+            if not ep.get("forecast"):
+                return SourceResult("nbm", error="no forecast url from /points")
+            r = await self._client.get(ep["forecast"])
             r.raise_for_status()
             js = r.json()
             periods = js.get("properties", {}).get("periods", [])
@@ -117,32 +140,63 @@ class DataSources:
             log.warning("nws daily fetch failed: %s", e)
             return SourceResult("nbm", error=str(e))
 
-    # ---- IEM ASOS observations ------------------------------------------
+    # ---- KNYC observations (via NWS /stations/KNYC/observations) --------
     async def asos_observations(self) -> List[Dict[str, Any]]:
+        """Live KNYC METAR observations for the past ~48 hours.
+
+        Uses the NWS station observations endpoint, which is the canonical
+        feed for the same ASOS station and doesn't require parsing IEM's
+        less-stable schema.
+        """
+        url = (f"https://api.weather.gov/stations/{cfg.STATION_ID}"
+               "/observations?limit=72")
         try:
-            r = await self._client.get(cfg.IEM_ASOS, params={"network": "NY_ASOS"})
+            r = await self._client.get(url)
             r.raise_for_status()
             js = r.json()
-            obs = []
-            for f in js.get("data", []) or js.get("features", []):
-                # API shape: {data: [{utc_valid, tmpf, drct, sknt, dwpf, skyc1...}]}
-                props = f.get("properties") if "properties" in f else f
-                ts = props.get("utc_valid") or props.get("valid")
+            obs: List[Dict[str, Any]] = []
+            for f in js.get("features", []):
+                p = f.get("properties", {}) or {}
+                ts = p.get("timestamp")
                 if not ts:
                     continue
                 try:
                     ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                 except Exception:
                     continue
+                temp_c = (p.get("temperature") or {}).get("value")
+                dew_c = (p.get("dewpoint") or {}).get("value")
+                wind_dir = (p.get("windDirection") or {}).get("value")
+                wind_mps = (p.get("windSpeed") or {}).get("value")
+                layers = p.get("cloudLayers") or []
+                sky_pct = None
+                if layers:
+                    # Highest coverage among layers (BKN/OVC > SCT > FEW > SKC)
+                    best = 0.0
+                    for layer in layers:
+                        v = _sky_to_pct(layer.get("amount"))
+                        if v is not None and v > best:
+                            best = v
+                    sky_pct = best
+                elif p.get("textDescription"):
+                    # crude fallback
+                    td = p["textDescription"].lower()
+                    if "clear" in td or "sunny" in td:
+                        sky_pct = 0.0
+                    elif "overcast" in td:
+                        sky_pct = 100.0
                 obs.append({
                     "observed_at": ts_dt.astimezone(cfg.EASTERN).isoformat(),
-                    "temperature_f": props.get("tmpf"),
-                    "wind_dir_deg": props.get("drct"),
-                    "wind_speed_kt": props.get("sknt"),
-                    "dewpoint_f": props.get("dwpf"),
-                    "sky_cover_pct": _sky_to_pct(props.get("skyc1")),
-                    "raw": props,
+                    "temperature_f": _c_to_f(temp_c) if temp_c is not None else None,
+                    "wind_dir_deg": wind_dir,
+                    "wind_speed_kt": (_mps_to_kt(wind_mps)
+                                      if wind_mps is not None else None),
+                    "dewpoint_f": _c_to_f(dew_c) if dew_c is not None else None,
+                    "sky_cover_pct": sky_pct,
+                    "raw": {"textDescription": p.get("textDescription")},
                 })
+            # Return chronologically ascending
+            obs.sort(key=lambda o: o["observed_at"])
             return obs
         except Exception as e:  # noqa: BLE001
             log.warning("asos fetch failed: %s", e)
