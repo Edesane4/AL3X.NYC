@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from al3x import config as cfg
+from al3x.ai_calibration import AICalibrator
 from al3x.logging_setup import configure as configure_logging
 from al3x.scheduler import AgentScheduler
 from al3x.storage import Storage
@@ -47,13 +48,16 @@ async def lifespan(app: FastAPI):
     configure_logging(notifier)
     await notifier.start()
 
-    agent = AgentScheduler(storage, notifier)
+    ai_calibrator = AICalibrator()
+    agent = AgentScheduler(storage, notifier, ai_calibrator=ai_calibrator)
     app.state.storage = storage
     app.state.notifier = notifier
     app.state.agent = agent
+    app.state.ai_calibrator = ai_calibrator
 
-    log.info("AL3X.NYC booting — DB=%s, Telegram=%s",
-             db_path, "enabled" if notifier.configured else "disabled")
+    log.info("AL3X.NYC booting — DB=%s, Telegram=%s, AI=%s",
+             db_path, "enabled" if notifier.configured else "disabled",
+             "enabled" if ai_calibrator.enabled else "disabled")
     if notifier.configured and os.environ.get(
             "AL3X_TELEGRAM_TEST_ON_START", "true").lower() == "true":
         notifier.enqueue(
@@ -94,10 +98,11 @@ async def state():
     logs = storage.recent_logs(limit=40)
     obs = storage.observations_today(today)
 
-    # Stats
+    # Stats + correction attribution
     from al3x.learning import Learning
     learning = Learning(storage)
     stats = learning.headline_stats()
+    attribution = learning.attribution_stats(days=30)
 
     # Running max from obs
     running_max_f = None
@@ -118,6 +123,9 @@ async def state():
         "logs": logs,
         "running_max_today_f": running_max_f,
         "stats": stats,
+        "attribution": attribution,
+        "ai_enabled": bool(getattr(app.state, "ai_calibrator", None)
+                           and app.state.ai_calibrator.enabled),
         "weights_override": storage.get_weights(),
         "biases_override": storage.get_biases(),
     })

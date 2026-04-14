@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional
+
+log = logging.getLogger("al3x.storage")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS forecasts (
@@ -38,6 +41,7 @@ CREATE TABLE IF NOT EXISTS observations (
     raw_json TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_obs_time ON observations(observed_at);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_obs_observed_at ON observations(observed_at);
 
 CREATE TABLE IF NOT EXISTS cli_truth (
     target_date TEXT PRIMARY KEY,
@@ -90,6 +94,22 @@ CREATE TABLE IF NOT EXISTS log_events (
     message TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_log_ts ON log_events(ts);
+
+-- Correction attribution (Superior Quality 3): per-day, per-correction ledger
+-- of whether the correction moved the forecast toward truth or away from it.
+CREATE TABLE IF NOT EXISTS correction_attribution (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target_date TEXT NOT NULL,
+    correction_name TEXT NOT NULL,
+    delta_applied_f REAL NOT NULL,
+    regime_label TEXT,
+    error_f REAL NOT NULL,
+    was_helpful INTEGER NOT NULL,        -- 1 helped, -1 hurt, 0 neutral
+    forecast_id INTEGER,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_attr_date ON correction_attribution(target_date);
+CREATE INDEX IF NOT EXISTS idx_attr_name ON correction_attribution(correction_name);
 """
 
 
@@ -98,6 +118,7 @@ class Storage:
         self.path = path
         self._lock = threading.Lock()
         self._init_schema()
+        self._migrate()
 
     @contextmanager
     def _conn(self):
@@ -113,6 +134,37 @@ class Storage:
     def _init_schema(self) -> None:
         with self._conn() as c:
             c.executescript(_SCHEMA)
+
+    def _migrate(self) -> None:
+        """Schema migrations for existing databases.
+
+        BUG 3 — the UNIQUE index on observations.observed_at is declared in
+        _SCHEMA so new DBs get it for free. For pre-existing databases that
+        may already have duplicates, this method dedupes first then retries
+        the index creation.
+        """
+        with self._conn() as c:
+            try:
+                c.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_obs_observed_at "
+                    "ON observations(observed_at)"
+                )
+            except sqlite3.IntegrityError:
+                log.warning("observations has duplicate observed_at rows; "
+                            "deduplicating before enforcing UNIQUE index")
+                c.execute(
+                    "DELETE FROM observations WHERE id NOT IN ("
+                    " SELECT MIN(id) FROM observations GROUP BY observed_at"
+                    ")"
+                )
+                c.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_obs_observed_at "
+                    "ON observations(observed_at)"
+                )
+            except sqlite3.OperationalError:
+                # observations table doesn't exist yet (e.g. in-memory DB
+                # race). _init_schema will handle it on a real file DB.
+                pass
 
     # -- forecasts ---------------------------------------------------------
     def save_forecast(self, row: Dict[str, Any]) -> int:
@@ -180,9 +232,11 @@ class Storage:
 
     # -- observations ------------------------------------------------------
     def save_observation(self, row: Dict[str, Any]) -> None:
+        """BUG 3 — INSERT OR IGNORE prevents duplicate observed_at rows from
+        corrupting the running-max calculation."""
         with self._conn() as c:
             c.execute(
-                """INSERT INTO observations
+                """INSERT OR IGNORE INTO observations
                    (observed_at, temperature_f, wind_dir_deg, wind_speed_kt,
                     dewpoint_f, sky_cover_pct, raw_json)
                    VALUES (?,?,?,?,?,?,?)""",
@@ -198,9 +252,12 @@ class Storage:
             )
 
     def observations_today(self, date_str: str) -> List[Dict]:
+        """BUG 4 — return the full row so downstream consumers
+        (inversion detection, Kalman filter, diurnal fit) can use
+        wind_dir_deg, wind_speed_kt, dewpoint_f, sky_cover_pct."""
         with self._conn() as c:
             rows = c.execute(
-                "SELECT observed_at, temperature_f FROM observations "
+                "SELECT * FROM observations "
                 "WHERE substr(observed_at,1,10)=? ORDER BY observed_at ASC",
                 (date_str,),
             ).fetchall()
@@ -312,6 +369,36 @@ class Storage:
                     datetime.utcnow().isoformat(),
                 ),
             )
+
+    # -- correction attribution (Superior 3) -----------------------------
+    def save_attribution(self, row: Dict[str, Any]) -> None:
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO correction_attribution
+                   (target_date, correction_name, delta_applied_f, regime_label,
+                    error_f, was_helpful, forecast_id, created_at)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    row["target_date"],
+                    row["correction_name"],
+                    row["delta_applied_f"],
+                    row.get("regime_label"),
+                    row["error_f"],
+                    int(row["was_helpful"]),
+                    row.get("forecast_id"),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+
+    def attribution_rows(self, days: int = 30) -> List[Dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM correction_attribution "
+                "WHERE target_date >= date('now', ?) "
+                "ORDER BY target_date DESC",
+                (f"-{days} days",),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
 
 def _forecast_row(r: Optional[sqlite3.Row]) -> Optional[Dict]:

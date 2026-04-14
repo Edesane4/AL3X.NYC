@@ -90,8 +90,17 @@ def _asos_trend_projection(obs_today: List[Dict[str, Any]],
 
 # ---- Regime detection for bias corrections ---------------------------------
 
-def _detect_regime(hourly: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Extract regime flags used by the bias-correction rules."""
+def _detect_regime(hourly: List[Dict[str, Any]],
+                   obs_today: Optional[List[Dict[str, Any]]] = None,
+                   grid_hourly: Optional[List[Dict[str, Any]]] = None,
+                   target_date: Optional[date] = None) -> Dict[str, Any]:
+    """Extract regime flags used by the bias-correction rules.
+
+    BUG 1: inversion_hint is now populated from obs_today (morning dewpoint
+    spread <= 5°F before 8 AM).
+    GAP 1: if grid_hourly (quantitative NWS grid data) is provided, its
+    numeric fields override string-parsed values from the hourly forecast.
+    """
     sea_breeze_shift = False
     sea_breeze_full = False
     wind_nw_all_day = True
@@ -103,11 +112,31 @@ def _detect_regime(hourly: List[Dict[str, Any]]) -> Dict[str, Any]:
     calm_clear = False
     sustained_windy = False
 
-    if not hourly:
+    if not hourly and not grid_hourly:
+        # Inversion can still be detected from ASOS obs alone.
+        iv = False
+        if obs_today:
+            for o in obs_today:
+                ts = o.get("observed_at")
+                if not ts:
+                    continue
+                try:
+                    dt = datetime.fromisoformat(ts)
+                except Exception:
+                    continue
+                if dt.hour >= 8:
+                    continue
+                t_f = o.get("temperature_f")
+                d_f = o.get("dewpoint_f")
+                if t_f is None or d_f is None:
+                    continue
+                if abs(t_f - d_f) <= 5.0:
+                    iv = True
+                    break
         return {"sea_breeze_shift": False, "sea_breeze_full": False,
                 "wind_nw_all_day": False, "cloud_morning_increase": False,
                 "cloud_afternoon_clearing": False, "any_precip_peak": False,
-                "precip_heavy": False, "inversion_hint": False,
+                "precip_heavy": False, "inversion_hint": iv,
                 "calm_clear": False, "sustained_windy": False,
                 "cloud_avg": None, "max_wind_kt": None}
 
@@ -154,10 +183,25 @@ def _detect_regime(hourly: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     if any(("S" in d and "SW" not in d) or "SE" in d for d in dir_during_afternoon):
         sea_breeze_shift = True
-        # Full sea breeze: sustained S/SE at >=10kt afternoon
-        afternoon_winds = [w for h, w in zip(hourly, wind_speeds[-len(hourly):])
-                           if 11 <= datetime.fromisoformat(h["time"]).hour <= 16]
-        if afternoon_winds and max(afternoon_winds, default=0) >= 10:
+        # BUG 2 — build afternoon wind speeds from the SAME hourly entry at
+        # the SAME time we check direction; the old code correlated against a
+        # flat wind_speeds list that skipped None entries, so it was wildly
+        # misaligned on any day with missing wind data.
+        afternoon_winds: List[float] = []
+        for h in hourly:
+            try:
+                ts = datetime.fromisoformat(h["time"])
+            except Exception:
+                continue
+            if not (11 <= ts.hour <= 16):
+                continue
+            wd = (h.get("wind_dir") or "").upper()
+            if not (("S" in wd and "SW" not in wd) or "SE" in wd):
+                continue
+            ws = parse_wind(h.get("wind"))
+            if ws is not None:
+                afternoon_winds.append(ws)
+        if afternoon_winds and max(afternoon_winds) >= 10:
             sea_breeze_full = True
 
     cloud_avg_morn = (sum(cloud_before_noon) / len(cloud_before_noon)
@@ -182,10 +226,98 @@ def _detect_regime(hourly: List[Dict[str, Any]]) -> Dict[str, Any]:
     if all_cloud:
         cloud_avg = sum(all_cloud) / len(all_cloud)
 
+    # BUG 1 — detect inversion/fog from this morning's ASOS observations.
+    # The directive: "overnight low within 5°F of dewpoint at 6 AM" implies
+    # radiation fog or trapped stable layer. Check any observation between
+    # midnight and 8 AM local.
+    if obs_today:
+        for o in obs_today:
+            ts = o.get("observed_at")
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts)
+            except Exception:
+                continue
+            if dt.hour >= 8:
+                continue
+            t_f = o.get("temperature_f")
+            d_f = o.get("dewpoint_f")
+            if t_f is None or d_f is None:
+                continue
+            if abs(t_f - d_f) <= 5.0:
+                inversion_hint = True
+                break
+
+    # GAP 1 — if the quantitative NWS grid data is available, override the
+    # string-parsed sky/precip/wind values with real numbers.
+    if grid_hourly:
+        grid_cloud_morning: List[float] = []
+        grid_cloud_afternoon: List[float] = []
+        grid_precip_peak: List[float] = []
+        grid_wind_kt: List[float] = []
+        grid_dir_afternoon: List[float] = []
+        for g in grid_hourly:
+            t = g.get("time")
+            if not t:
+                continue
+            try:
+                gdt = datetime.fromisoformat(t)
+            except Exception:
+                continue
+            if target_date and gdt.date() != target_date:
+                continue
+            hour = gdt.hour
+            sky = g.get("sky_cover_pct")
+            precip_prob = g.get("precip_prob_pct")
+            wspd = g.get("wind_speed_kt")
+            wdir = g.get("wind_dir_deg")
+            if sky is not None:
+                if hour < 12:
+                    grid_cloud_morning.append(sky)
+                else:
+                    grid_cloud_afternoon.append(sky)
+            if precip_prob is not None and 10 <= hour <= 15:
+                grid_precip_peak.append(precip_prob)
+            if wspd is not None:
+                grid_wind_kt.append(wspd)
+            if wdir is not None and 11 <= hour <= 15:
+                grid_dir_afternoon.append(wdir)
+
+        if grid_cloud_morning:
+            peak_cloud_morning = max(peak_cloud_morning, max(grid_cloud_morning))
+            cloud_avg_morn = sum(grid_cloud_morning) / len(grid_cloud_morning)
+        if grid_cloud_afternoon:
+            cloud_avg_aft = (sum(grid_cloud_afternoon)
+                             / len(grid_cloud_afternoon))
+        if grid_cloud_morning or grid_cloud_afternoon:
+            if peak_cloud_morning >= 50 and (cloud_avg_aft or 0) >= 30:
+                cloud_morning_increase = True
+            if (cloud_avg_morn or 0) >= 60 and (cloud_avg_aft or 100) <= 30:
+                cloud_afternoon_clearing = True
+        if grid_precip_peak:
+            any_precip_peak = any(p >= 40 for p in grid_precip_peak)
+            if any(p >= 70 for p in grid_precip_peak):
+                precip_heavy = True
+        if grid_wind_kt:
+            max_wind = max(max_wind, max(grid_wind_kt))
+            sustained_windy = max_wind >= 15
+        # Sea breeze from quantitative direction (S=180±45, SE=135±22.5)
+        if grid_dir_afternoon:
+            if any(120 <= d <= 210 for d in grid_dir_afternoon):
+                sea_breeze_shift = True
+            if all(d >= 270 or d <= 45 for d in grid_dir_afternoon):
+                wind_nw_all_day = True
+
+    # Re-evaluate calm_clear with possibly-updated cloud/wind signals
+    calm_clear = (max_wind < 10 and (cloud_avg_aft or 100) <= 30
+                  and (cloud_avg_morn or 100) <= 50)
+
     return {
         "sea_breeze_shift": sea_breeze_shift,
         "sea_breeze_full": sea_breeze_full,
-        "wind_nw_all_day": wind_nw_all_day and bool(dir_during_afternoon),
+        "wind_nw_all_day": wind_nw_all_day and bool(dir_during_afternoon
+                                                     or (grid_hourly or [])),
         "cloud_morning_increase": cloud_morning_increase,
         "cloud_afternoon_clearing": cloud_afternoon_clearing,
         "any_precip_peak": any_precip_peak,
@@ -298,9 +430,11 @@ def _apply_corrections(target_date: date, regime: Dict[str, Any],
 # ---- Main entrypoint -------------------------------------------------------
 
 class Forecaster:
-    def __init__(self, storage, sources: DataSources) -> None:
+    def __init__(self, storage, sources: DataSources,
+                 ai_calibrator=None) -> None:
         self.storage = storage
         self.sources = sources
+        self.ai_calibrator = ai_calibrator
 
     def _live_bias(self) -> BiasLive:
         values = self.storage.get_biases()
@@ -328,25 +462,11 @@ class Forecaster:
             0.0,
         )
 
-        # Fetch everything in parallel-ish (awaited sequentially but cheap)
+        # Fetch everything concurrently
         import asyncio
-        hourly_task = asyncio.create_task(self.sources.nws_hourly_max(target_date))
-        nbm_task = asyncio.create_task(self.sources.nws_daily_max(target_date))
-        hrrr_task = asyncio.create_task(self.sources.hrrr(target_date))
-        ecmwf_task = asyncio.create_task(self.sources.ecmwf(target_date))
-        gfs_task = asyncio.create_task(self.sources.gfs_mos(target_date))
-        nam_task = asyncio.create_task(self.sources.nam_mos(target_date))
         asos_task = asyncio.create_task(self.sources.asos_observations())
+        obs = await asos_task  # need these first to weight the diurnal fit
 
-        nws_r = await hourly_task
-        nbm_r = await nbm_task
-        hrrr_r = await hrrr_task
-        ecmwf_r = await ecmwf_task
-        gfs_r = await gfs_task
-        nam_r = await nam_task
-        obs = await asos_task
-
-        # Persist observations we haven't seen
         today_str = target_date.isoformat() if mode == "intraday" else None
         if mode == "intraday" and obs:
             seen = {o["observed_at"]
@@ -355,8 +475,28 @@ class Forecaster:
                 if o["observed_at"][:10] == today_str \
                         and o["observed_at"] not in seen:
                     self.storage.save_observation(o)
+        obs_today = (self.storage.observations_today(today_str)
+                     if today_str else [])
 
-        obs_today = self.storage.observations_today(today_str) if today_str else []
+        hourly_task = asyncio.create_task(self.sources.nws_hourly_max(target_date))
+        nbm_task = asyncio.create_task(self.sources.nws_daily_max(target_date))
+        grid_task = asyncio.create_task(self.sources.nws_grid_data(target_date))
+        # BUG 5 — pass lead_hours so HRRR picks ncep_hrrr vs gfs_seamless
+        hrrr_task = asyncio.create_task(
+            self.sources.hrrr(target_date, lead_hours=lead_hours,
+                              also_obs=obs_today))
+        ecmwf_task = asyncio.create_task(
+            self.sources.ecmwf(target_date, also_obs=obs_today))
+        gfs_task = asyncio.create_task(self.sources.gfs_mos(target_date))
+        nam_task = asyncio.create_task(self.sources.nam_mos(target_date))
+
+        nws_r = await hourly_task
+        nbm_r = await nbm_task
+        grid_r = await grid_task
+        hrrr_r = await hrrr_task
+        ecmwf_r = await ecmwf_task
+        gfs_r = await gfs_task
+        nam_r = await nam_task
 
         running_max_f, _ = running_max(obs_today)
 
@@ -374,24 +514,85 @@ class Forecaster:
                 obs_today, nws_r.meta.get("hourly", []), target_date,
             )
 
+        # Superior Quality 1 — Kalman tracker on intraday temperature state
+        kalman_result = None
+        if mode == "intraday" and len(obs_today) >= 3:
+            try:
+                from .kalman_tracker import project_daily_max
+                kalman_result = project_daily_max(
+                    obs_today,
+                    hrrr_r.meta.get("hourly_today"),
+                    running_max_f,
+                    None,
+                )
+                if kalman_result:
+                    raw_values["kalman"] = kalman_result["projected_max_f"]
+            except Exception as e:  # noqa: BLE001
+                log.warning("Kalman tracker failed: %s", e)
+
         source_values = {k: v for k, v in raw_values.items() if v is not None}
 
         weights = self._live_weights(mode, lead_hours)
+        # Inject Kalman weight dynamically (blend_weight from the tracker)
+        if kalman_result and "kalman" in source_values:
+            kw = float(kalman_result.get("blend_weight", 0.2))
+            # Scale remaining weights down so they still sum with kalman to 1
+            remaining_sum = sum(v for k, v in weights.items() if k != "kalman")
+            scale = (1.0 - kw) / remaining_sum if remaining_sum > 0 else 0.0
+            weights = {k: v * scale for k, v in weights.items() if k != "kalman"}
+            weights["kalman"] = kw
+
         raw_ensemble, views = _weighted_mean(source_values, weights)
 
-        # Spread calc from contributing (weighted, >0) sources
         contrib_vals = [v.value for v in views.values()
                         if v.value is not None and v.weight > 0]
-        spread = (max(contrib_vals) - min(contrib_vals)) if contrib_vals else 0.0
+        spread = ((max(contrib_vals) - min(contrib_vals))
+                  if contrib_vals else 0.0)
 
-        # Corrections
+        # Corrections — regime now gets obs_today (Bug 1) + grid data (Gap 1)
         bias = self._live_bias()
-        regime = _detect_regime(nws_r.meta.get("hourly", []))
+        regime = _detect_regime(
+            nws_r.meta.get("hourly", []),
+            obs_today=obs_today,
+            grid_hourly=grid_r.meta.get("hourly_grid") if grid_r else None,
+            target_date=target_date,
+        )
         total_delta, corrections = _apply_corrections(
             target_date, regime, spread, bias
         )
 
         final = raw_ensemble + total_delta
+
+        # Gap 5 — Claude AI calibration layer (optional). Applied after
+        # bias corrections, before running-max floor.
+        ai_result = {"delta_f": 0.0, "confidence": 0.0,
+                     "reasoning": "AI layer not configured", "source": "disabled"}
+        if self.ai_calibrator is not None:
+            try:
+                recent_scores = self.storage.recent_scores(days=14)
+                temp_fc = {
+                    "mode": mode,
+                    "target_date": target_date.isoformat(),
+                    "final_f": round(final, 1),
+                    "raw_ensemble_f": round(raw_ensemble, 2),
+                    "uncertainty_f": 2.0,
+                    "running_asos_max_f": running_max_f,
+                    "sources": {
+                        k: {"value": raw_values.get(k),
+                            "weight": weights.get(k, 0.0) if k in source_values else 0.0,
+                            "error": None}
+                        for k in raw_values
+                    },
+                    "corrections": corrections,
+                    "extras": {"regime": regime, "spread_f": spread,
+                               "lead_hours": lead_hours},
+                }
+                ai_result = await self.ai_calibrator.calibrate(
+                    temp_fc, obs_today, recent_scores
+                )
+                final = final + ai_result.get("delta_f", 0.0)
+            except Exception as e:  # noqa: BLE001
+                log.warning("AI calibration failed, continuing without: %s", e)
 
         # Running-max floor for intraday
         if mode == "intraday" and running_max_f is not None:
@@ -415,7 +616,7 @@ class Forecaster:
         # Build sources dict for storage (include all attempted sources)
         sources_persist: Dict[str, Dict[str, Any]] = {}
         for name in ("hrrr", "nws_point", "gfs_mos", "nam_mos",
-                     "ecmwf", "nbm", "asos_trend"):
+                     "ecmwf", "nbm", "asos_trend", "kalman"):
             sources_persist[name] = {
                 "value": raw_values.get(name),
                 "weight": weights.get(name, 0.0) if name in source_values else 0.0,
@@ -426,11 +627,24 @@ class Forecaster:
                 }.get(name),
             }
 
+        # Diurnal fit + HRRR model metadata for dashboard visibility
+        if hrrr_r.meta.get("fit_quality") is not None:
+            sources_persist["hrrr"]["fit_quality"] = hrrr_r.meta["fit_quality"]
+            sources_persist["hrrr"]["fitted_peak_hour"] = hrrr_r.meta.get(
+                "fitted_peak_hour")
+            sources_persist["hrrr"]["model_used"] = hrrr_r.meta.get("model_used")
+        if ecmwf_r.meta.get("fit_quality") is not None:
+            sources_persist["ecmwf"]["fit_quality"] = ecmwf_r.meta["fit_quality"]
+            sources_persist["ecmwf"]["fitted_peak_hour"] = ecmwf_r.meta.get(
+                "fitted_peak_hour")
+
         extras = {
             "regime": regime,
             "spread_f": spread,
             "lead_hours": lead_hours,
             "weights_used": weights,
+            "kalman": kalman_result,
+            "ai_calibration": ai_result,
         }
 
         return {

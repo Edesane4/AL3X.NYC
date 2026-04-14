@@ -140,6 +140,51 @@ class DataSources:
             log.warning("nws daily fetch failed: %s", e)
             return SourceResult("nbm", error=str(e))
 
+    # ---- GAP 1: quantitative NWS grid data ------------------------------
+    async def nws_grid_data(self, target_date: date) -> SourceResult:
+        """Fetch the raw numerical gridded forecast (sky %, precip %, dewpoint
+        °F, wind speed kt, wind dir deg) for target_date.
+
+        Replaces string-matching of NWS shortForecast with real numbers for
+        regime detection.
+        """
+        try:
+            ep = await self._nws_endpoints()
+            if not ep.get("forecastGridData"):
+                return SourceResult("nws_grid",
+                                    error="no forecastGridData url")
+            r = await self._client.get(ep["forecastGridData"])
+            r.raise_for_status()
+            props = r.json().get("properties", {}) or {}
+
+            hourly: Dict[str, Dict[str, Any]] = {}
+            _insert_grid_series(hourly, props.get("skyCover"),
+                                "sky_cover_pct", target_date, to_f=False)
+            _insert_grid_series(hourly,
+                                props.get("probabilityOfPrecipitation"),
+                                "precip_prob_pct", target_date, to_f=False)
+            # NWS gridData reports temperature / dewpoint in °C via wmoUnit.
+            _insert_grid_series(hourly, props.get("temperature"),
+                                "temperature_f", target_date, to_f=True)
+            _insert_grid_series(hourly, props.get("dewpoint"),
+                                "dewpoint_f", target_date, to_f=True)
+            # Wind speed in km/h per NWS convention -> convert to kt.
+            _insert_grid_series(hourly, props.get("windSpeed"),
+                                "wind_speed_kt", target_date,
+                                convert_kmh_to_kt=True)
+            _insert_grid_series(hourly, props.get("windDirection"),
+                                "wind_dir_deg", target_date, to_f=False)
+
+            if not hourly:
+                return SourceResult("nws_grid", error="no hourly grid series")
+
+            series = [v for _, v in sorted(hourly.items())]
+            return SourceResult("nws_grid", value=None,
+                                meta={"hourly_grid": series})
+        except Exception as e:  # noqa: BLE001
+            log.warning("nws grid fetch failed: %s", e)
+            return SourceResult("nws_grid", error=str(e))
+
     # ---- KNYC observations (via NWS /stations/KNYC/observations) --------
     async def asos_observations(self) -> List[Dict[str, Any]]:
         """Live KNYC METAR observations for the past ~48 hours.
@@ -171,7 +216,6 @@ class DataSources:
                 layers = p.get("cloudLayers") or []
                 sky_pct = None
                 if layers:
-                    # Highest coverage among layers (BKN/OVC > SCT > FEW > SKC)
                     best = 0.0
                     for layer in layers:
                         v = _sky_to_pct(layer.get("amount"))
@@ -179,7 +223,6 @@ class DataSources:
                             best = v
                     sky_pct = best
                 elif p.get("textDescription"):
-                    # crude fallback
                     td = p["textDescription"].lower()
                     if "clear" in td or "sunny" in td:
                         sky_pct = 0.0
@@ -195,7 +238,6 @@ class DataSources:
                     "sky_cover_pct": sky_pct,
                     "raw": {"textDescription": p.get("textDescription")},
                 })
-            # Return chronologically ascending
             obs.sort(key=lambda o: o["observed_at"])
             return obs
         except Exception as e:  # noqa: BLE001
@@ -205,8 +247,6 @@ class DataSources:
     # ---- GFS-MOS / NAM-MOS ---------------------------------------------
     async def mos(self, product_url: str, source_name: str,
                   target_date: date) -> SourceResult:
-        # Short timeout: MDL endpoints are known to hang intermittently,
-        # and MOS is optional — the ensemble re-weights without it.
         try:
             r = await self._client.get(
                 product_url,
@@ -222,8 +262,6 @@ class DataSources:
                 return SourceResult(source_name, error="no max field parsed")
             return SourceResult(source_name, value=val, meta={"raw_len": len(txt)})
         except Exception as e:  # noqa: BLE001
-            # MOS endpoints (mdl.nws.noaa.gov) are flaky — don't surface as
-            # a WARNING (would spam Telegram). Downgrade to INFO.
             msg = str(e) or type(e).__name__
             log.info("%s fetch skipped (%s): %s",
                      source_name, type(e).__name__, msg)
@@ -237,7 +275,16 @@ class DataSources:
 
     # ---- Open-Meteo: HRRR + ECMWF --------------------------------------
     async def open_meteo(self, target_date: date, model: str,
-                         name: str) -> SourceResult:
+                         name: str,
+                         also_obs: Optional[List[Dict[str, Any]]] = None
+                         ) -> SourceResult:
+        """Fetch hourly temperatures from Open-Meteo and derive the daily max.
+
+        Superior Quality 2 — when scipy is available, the raw hourly profile
+        is fed through diurnal_fit.fit_peak() to get the analytical peak
+        (which catches between-hour maxima), blending any available ASOS
+        obs for `also_obs`.
+        """
         try:
             params = {
                 "latitude": cfg.LAT, "longitude": cfg.LON,
@@ -255,25 +302,82 @@ class DataSources:
             temps = js.get("hourly", {}).get("temperature_2m", [])
             if not times:
                 return SourceResult(name, error="empty hourly")
-            vals = [t for ts, t in zip(times, temps)
-                    if t is not None and _parse_dt(ts).date() == target_date]
-            if not vals:
+
+            hourly_today: List[Tuple[float, float]] = []
+            for ts, t in zip(times, temps):
+                if t is None:
+                    continue
+                dt = _parse_dt(ts)
+                if dt.date() != target_date:
+                    continue
+                hourly_today.append((dt.hour + dt.minute / 60.0, float(t)))
+
+            if not hourly_today:
                 return SourceResult(name, error="no target-date hours")
-            return SourceResult(name, value=max(vals),
-                                meta={"hours_count": len(vals)})
+
+            raw_max = max(t for _, t in hourly_today)
+
+            fitted_max = raw_max
+            fit_quality = None
+            fitted_peak_hour = None
+            try:
+                from .diurnal_fit import fit_peak
+                fit = fit_peak(hourly_today, also_obs or [], target_date)
+                if fit is not None:
+                    fitted_max = fit["fitted_max_f"]
+                    fit_quality = fit.get("r_squared")
+                    fitted_peak_hour = fit.get("fitted_peak_hour")
+            except Exception as e:  # noqa: BLE001
+                log.info("diurnal fit unavailable for %s: %s", name, e)
+
+            return SourceResult(
+                name,
+                value=fitted_max,
+                meta={
+                    "hours_count": len(hourly_today),
+                    "raw_max_f": raw_max,
+                    "fit_quality": fit_quality,
+                    "fitted_peak_hour": fitted_peak_hour,
+                    "hourly_today": hourly_today,
+                },
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("%s fetch failed: %s", name, e)
             return SourceResult(name, error=str(e))
 
-    async def hrrr(self, target_date: date) -> SourceResult:
-        return await self.open_meteo(target_date, "best_match", "hrrr")
+    async def hrrr(self, target_date: date, lead_hours: float = 12.0,
+                   also_obs: Optional[List[Dict[str, Any]]] = None
+                   ) -> SourceResult:
+        """BUG 5 — use the actual HRRR model for short lead times instead of
+        best_match (which Open-Meteo blends across models).
 
-    async def ecmwf(self, target_date: date) -> SourceResult:
-        return await self.open_meteo(target_date, "ecmwf_ifs04", "ecmwf")
+        - lead_hours < 18: prefer ncep_hrrr (3km HRRR)
+        - lead_hours >= 18: use gfs_seamless (GFS is HRRR's day+1 parent)
+        - if the preferred model fails or returns no data, fall back to
+          best_match and log a specific warning.
+        """
+        primary = "ncep_hrrr" if lead_hours < 18 else "gfs_seamless"
+        res = await self.open_meteo(target_date, primary, "hrrr",
+                                    also_obs=also_obs)
+        if res.value is not None:
+            res.meta["model_used"] = primary
+            return res
+        log.warning("HRRR primary model %s unavailable (%s); falling back "
+                    "to best_match", primary, res.error)
+        fb = await self.open_meteo(target_date, "best_match", "hrrr",
+                                   also_obs=also_obs)
+        fb.meta["model_used"] = "best_match (fallback)"
+        fb.meta["primary_error"] = res.error
+        return fb
+
+    async def ecmwf(self, target_date: date,
+                    also_obs: Optional[List[Dict[str, Any]]] = None
+                    ) -> SourceResult:
+        return await self.open_meteo(target_date, "ecmwf_ifs04", "ecmwf",
+                                     also_obs=also_obs)
 
     # ---- CLI verification feed -----------------------------------------
     async def cli_latest(self) -> Optional[Dict[str, Any]]:
-        """Fetch the CLI product and parse recorded max + issuance date."""
         try:
             r = await self._client.get(cfg.NWS_CLI)
             r.raise_for_status()
@@ -306,44 +410,68 @@ def _parse_dt(s: str) -> datetime:
         return datetime.strptime(s, "%Y-%m-%dT%H:%M")
 
 
-def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
-    """Parse a GFS-MOS / NAM-MOS text bulletin to pull max temp for target_date.
+def _iter_grid_series(series: Optional[Dict[str, Any]]):
+    """NWS grid series = {"uom": ..., "values": [{"validTime": "...", "value": x}]}.
 
-    MOS bulletins list FHR HH values across multiple days. The simpler,
-    more resilient strategy is to scan for lines starting with 'X/N' (max/min)
-    or 'TMP' and correlate with the DT header. We take the first MAX value
-    whose DT falls on the target day (UTC → local approximation by
-    treating DT as the verification date).
-
-    Returns None if parsing fails.
+    validTime is ISO8601 interval "2026-04-14T12:00:00+00:00/PT1H"; expand to
+    per-hour entries for slicing.
     """
-    # KNYC bulletins often use the pattern:
-    # "DT /MMDD/.../HH/ .."   with X/N row for daily max/min
-    # This is intentionally forgiving; we accept the first X/N value.
+    if not series or not series.get("values"):
+        return
+    for v in series["values"]:
+        vt = v.get("validTime") or ""
+        if "/" not in vt:
+            continue
+        start_s, dur = vt.split("/", 1)
+        try:
+            start = datetime.fromisoformat(start_s)
+        except Exception:
+            continue
+        # parse ISO-8601 duration PTxH (we only need hours; fall back to 1h)
+        m = re.search(r"PT(\d+)H", dur)
+        hours = int(m.group(1)) if m else 1
+        val = v.get("value")
+        if val is None:
+            continue
+        for h in range(hours):
+            yield (start + timedelta(hours=h)).astimezone(cfg.EASTERN), val
+
+
+def _insert_grid_series(out: Dict[str, Dict[str, Any]],
+                         series: Optional[Dict[str, Any]],
+                         key: str, target_date: date,
+                         to_f: bool = False,
+                         convert_kmh_to_kt: bool = False) -> None:
+    for ts, val in _iter_grid_series(series):
+        if ts.date() != target_date:
+            continue
+        iso_key = ts.isoformat()
+        slot = out.setdefault(iso_key, {"time": iso_key})
+        v = val
+        if to_f:
+            v = _c_to_f(val)
+        elif convert_kmh_to_kt:
+            v = val * 0.539957
+        slot[key] = v
+
+
+def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
     try:
-        # Narrow to the KNYC section if present
         m = re.search(rf"{cfg.STATION_ID}[^\n]*(?:\n.+){{0,40}}", text)
         block = m.group(0) if m else text
-
-        # Find DT header to know which columns are max temps
         dt_line = re.search(r"^\s*DT\s+([^\n]+)$", block, re.MULTILINE)
         xn_line = re.search(r"^\s*X/N\s+([^\n]+)$", block, re.MULTILINE)
         if not xn_line:
             return None
-
         xn_values = re.findall(r"-?\d+", xn_line.group(1))
         if not xn_values:
             return None
-
-        # If we can read DT row, match the value whose date == target_date
         if dt_line:
             dt_tokens = dt_line.group(1).split()
             target_day = target_date.strftime("%d")
             for tok, v in zip(dt_tokens, xn_values):
                 if target_day in tok:
                     return float(v)
-
-        # Fallback: first max value (earliest period in the bulletin)
         return float(xn_values[0])
     except Exception as e:  # noqa: BLE001
         log.debug("mos parse error: %s", e)
@@ -351,16 +479,10 @@ def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
 
 
 def _parse_cli(text: str) -> Optional[Dict[str, Any]]:
-    """Parse NWS CLI product HTML / plain text.
-
-    We look for the 'MAXIMUM' row, its observed value, and the 'VALID' date.
-    """
-    # Strip HTML
     plain = re.sub(r"<[^>]+>", "\n", text)
     plain = re.sub(r"&nbsp;", " ", plain)
     plain = re.sub(r"[ \t]+", " ", plain)
 
-    # Pull the issuance date ("CLIMATE REPORT ... VALID TODAY <MONTH DAY YYYY>" etc.)
     date_match = re.search(
         r"CLIMATE REPORT.*?VALID[^\n]*?"
         r"(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|"
@@ -377,7 +499,6 @@ def _parse_cli(text: str) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
-    # Maximum row: "MAXIMUM  67  1251 PM" – take first integer after MAXIMUM
     max_match = re.search(r"MAXIMUM\s+(-?\d+)", plain, re.IGNORECASE)
     if not max_match:
         return None
@@ -396,7 +517,6 @@ def _parse_cli(text: str) -> Optional[Dict[str, Any]]:
 
 def running_max(obs_today: List[Dict[str, Any]]) -> Tuple[Optional[float],
                                                            Optional[str]]:
-    """Return (max_f, timestamp) over today's observations."""
     best: Optional[Tuple[float, str]] = None
     for o in obs_today:
         t = o.get("temperature_f")
@@ -408,11 +528,6 @@ def running_max(obs_today: List[Dict[str, Any]]) -> Tuple[Optional[float],
 
 
 def high_confirmed(obs_today: List[Dict[str, Any]]) -> bool:
-    """High Confirmation Rule.
-
-    Requires temperature to have dropped >=2°F from running max AND stayed
-    below max for 2 consecutive hours AND it must be past 2:00 PM local.
-    """
     now = _now_eastern()
     if now.hour < 14:
         return False
@@ -430,12 +545,10 @@ def high_confirmed(obs_today: List[Dict[str, Any]]) -> bool:
     if not after_max:
         return False
 
-    # Check drop
     last_temp = after_max[-1][1]
     if max_f - last_temp < 2.0:
         return False
 
-    # Check that the last 2h all stayed below max
     two_hours_ago = now - timedelta(hours=2)
     recent = [t for ts, t in after_max
               if datetime.fromisoformat(ts) >= two_hours_ago]

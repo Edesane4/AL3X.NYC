@@ -13,7 +13,7 @@ import asyncio
 import logging
 import traceback
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Dict, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -31,14 +31,17 @@ log = logging.getLogger("al3x.scheduler")
 
 
 class AgentScheduler:
-    def __init__(self, storage: Storage, notifier: TelegramNotifier) -> None:
+    def __init__(self, storage: Storage, notifier: TelegramNotifier,
+                 ai_calibrator=None) -> None:
         self.storage = storage
         self.notifier = notifier
         self.sources = DataSources()
-        self.forecaster = Forecaster(storage, self.sources)
+        self.forecaster = Forecaster(storage, self.sources,
+                                      ai_calibrator=ai_calibrator)
         self.learning = Learning(storage)
         self.scheduler = AsyncIOScheduler(timezone=str(cfg.EASTERN))
-        self._night_before_done_for: Optional[str] = None
+        # BUG 6 — up to 3 night-before runs per evening, tracked by date.
+        self._night_before_runs: Dict[str, int] = {}
         self._cli_verified_for: set[str] = set()
         self._high_locked_for: set[str] = set()
         self._last_forecast_finalf: Optional[float] = None
@@ -58,10 +61,12 @@ class AgentScheduler:
             CronTrigger(hour="18-23", minute="0,30", timezone=str(cfg.EASTERN)),
             id="night_before",
         )
-        # CLI polling 5:30 – 7:30 PM Eastern every 10 minutes
+        # GAP 4 — CLI polling 5 PM – 9:59 PM Eastern every 10 min to catch
+        # late postings on complex-weather evenings. Already-verified dates
+        # are skipped via _cli_verified_for so extra polls are cheap.
         self.scheduler.add_job(
             self._safe(self.cli_verification_cycle),
-            CronTrigger(hour="17-19", minute="0,10,20,30,40,50",
+            CronTrigger(hour="17-21", minute="0,10,20,30,40,50",
                         timezone=str(cfg.EASTERN)),
             id="cli_verify",
         )
@@ -141,19 +146,43 @@ class AgentScheduler:
                 )
 
     # ---- Night-before ---------------------------------------------------
-    async def night_before_cycle(self) -> None:
+    async def night_before_cycle(self, forced: bool = False) -> None:
+        """BUG 6 — allow up to 3 night-before runs per evening:
+          run #1: any time after 6 PM
+          run #2: after 8:30 PM Eastern (18Z ECMWF + later MOS in)
+          run #3: only after CLI has verified for today (fresh weights)
+        The forced=True bypass is used by API /force endpoints.
+        """
         now = datetime.now(cfg.EASTERN)
         tomorrow = (now + timedelta(days=1)).date()
-        # only fire once per evening unless CLI has posted and learning ran
-        if self._night_before_done_for == tomorrow.isoformat():
-            return
-        # Prefer to run after CLI has verified today, but don't block
+        key = tomorrow.isoformat()
+        runs_done = self._night_before_runs.get(key, 0)
+
+        if not forced:
+            if runs_done >= 3:
+                return
+            today_key = now.date().isoformat()
+            cli_ready = today_key in self._cli_verified_for
+            # Gate runs by time-of-day / CLI readiness
+            if runs_done == 0:
+                if now.hour < 18:
+                    return
+            elif runs_done == 1:
+                if now.hour < 20 or (now.hour == 20 and now.minute < 30):
+                    return
+            elif runs_done == 2:
+                if not cli_ready:
+                    return
+
+        run_number = runs_done + 1
         fc = await self.forecaster.produce("night_before", tomorrow)
+        fc["extras"] = dict(fc.get("extras", {}))
+        fc["extras"]["night_before_run"] = run_number
         fid = self.storage.save_forecast(fc)
         fc["id"] = fid
-        self._night_before_done_for = tomorrow.isoformat()
-        log.info("Night-before forecast %s: %.1f°F",
-                 fc["target_date"], fc["final_f"])
+        self._night_before_runs[key] = run_number
+        log.info("Night-before forecast (run %d/3) %s: %.1f°F",
+                 run_number, fc["target_date"], fc["final_f"])
         if self.notifier.configured:
             self.notifier.enqueue(format_forecast_for_humans(fc))
 
@@ -186,7 +215,8 @@ class AgentScheduler:
                 format_cli_confirmation(today_str, cli["recorded_high_f"],
                                          best_f, err)
             )
-        # Trigger night-before for tomorrow now that truth is in
+        # Trigger night-before for tomorrow now that truth is in (run #3
+        # gate is "CLI verified", which is now true).
         await self.night_before_cycle()
 
     # ---- Auto-tune ------------------------------------------------------
