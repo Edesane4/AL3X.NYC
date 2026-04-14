@@ -31,11 +31,11 @@ MDL_NAMMOS = "https://mdl.nws.noaa.gov/api/product/nammos/"
 # The file contains the FULL national MAV/MET bulletin (~5-10 MB of text);
 # we download once per cycle and extract the KNYC section in memory.
 GFS_MOS_URL_TEMPLATE = (
-    "https://ftpprd.ncep.noaa.gov/data/nccf/com/gfs/prod/"
+    "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/"
     "gfsmos.{date}/mdl_gfsmav.t{cycle}z"
 )
 NAM_MOS_URL_TEMPLATE = (
-    "https://ftpprd.ncep.noaa.gov/data/nccf/com/nam/prod/"
+    "https://nomads.ncep.noaa.gov/pub/data/nccf/com/nam/prod/"
     "nam_mos.{date}/mdl_nammet.t{cycle}z"
 )
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
