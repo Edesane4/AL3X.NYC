@@ -488,7 +488,6 @@ class Forecaster:
         ecmwf_task = asyncio.create_task(
             self.sources.ecmwf(target_date, also_obs=obs_today))
         gfs_task = asyncio.create_task(self.sources.gfs_mos(target_date))
-        nam_task = asyncio.create_task(self.sources.nam_mos(target_date))
 
         nws_r = await hourly_task
         nbm_r = await nbm_task
@@ -496,7 +495,6 @@ class Forecaster:
         hrrr_r = await hrrr_task
         ecmwf_r = await ecmwf_task
         gfs_r = await gfs_task
-        nam_r = await nam_task
 
         running_max_f, _ = running_max(obs_today)
 
@@ -505,7 +503,6 @@ class Forecaster:
             "hrrr": hrrr_r.value,
             "nws_point": nws_r.value,
             "gfs_mos": gfs_r.value,
-            "nam_mos": nam_r.value,
             "ecmwf": ecmwf_r.value,
             "nbm": nbm_r.value,
         }
@@ -615,14 +612,14 @@ class Forecaster:
 
         # Build sources dict for storage (include all attempted sources)
         sources_persist: Dict[str, Dict[str, Any]] = {}
-        for name in ("hrrr", "nws_point", "gfs_mos", "nam_mos",
+        for name in ("hrrr", "nws_point", "gfs_mos",
                      "ecmwf", "nbm", "asos_trend", "kalman"):
             sources_persist[name] = {
                 "value": raw_values.get(name),
                 "weight": weights.get(name, 0.0) if name in source_values else 0.0,
                 "error": {
                     "hrrr": hrrr_r.error, "nws_point": nws_r.error,
-                    "gfs_mos": gfs_r.error, "nam_mos": nam_r.error,
+                    "gfs_mos": gfs_r.error,
                     "ecmwf": ecmwf_r.error, "nbm": nbm_r.error,
                 }.get(name),
             }

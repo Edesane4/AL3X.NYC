@@ -26,16 +26,13 @@ IEM_ASOS = (
 MDL_MOS = "https://mdl.nws.noaa.gov/api/product/glamos/"
 MDL_NAMMOS = "https://mdl.nws.noaa.gov/api/product/nammos/"
 
-# Canonical MOS sources — Iowa Environmental Mesonet (mesonet.agron.iastate.edu)
-# serves per-station MAV/MET text bulletins at a simple JSON/text API. IEM has
-# been archiving NWS MOS since 2008 and their endpoint is purpose-built for
-# scripted access (unlike NOAA's FTPPRD/NOMADS which are either unreachable or
-# don't mirror MOS to nomads). The .txt endpoint returns a single-station
-# MAV/MET block we can feed straight to _parse_mos_max().
+# Canonical MOS source — Iowa Environmental Mesonet per-station MAV endpoint.
+# NAM-MOS (MET) is intentionally not included: IEM does not archive NAM-MOS
+# for KNYC (Central Park is on the GFS full-station list but not the NAM
+# cooperative list). We don't substitute a nearby airport station — the
+# ensemble re-weights across the remaining sources.
 GFS_MOS_URL = ("https://mesonet.agron.iastate.edu/api/1/mos.txt"
                f"?station={STATION_ID}&model=GFS")
-NAM_MOS_URL = ("https://mesonet.agron.iastate.edu/api/1/mos.txt"
-               f"?station={STATION_ID}&model=NAM")
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
 NWS_CLI = (
     "https://forecast.weather.gov/product.php"
@@ -50,11 +47,12 @@ HTTP_TIMEOUT = 20.0
 # Weights are dicts keyed by source name. They must sum to ~1.0 but the
 # forecaster re-normalizes anything missing.
 NIGHT_BEFORE_WEIGHTS: Dict[str, float] = {
-    "hrrr": 0.25,
+    # NAM-MOS removed (IEM doesn't archive it for KNYC). The 15% that was
+    # on NAM is redistributed proportionally across the remaining four.
+    "hrrr": 0.30,
     "nws_point": 0.25,
-    "gfs_mos": 0.20,
-    "nam_mos": 0.15,
-    "ecmwf": 0.15,
+    "gfs_mos": 0.25,
+    "ecmwf": 0.20,
 }
 
 INTRADAY_WEIGHTS_0_6 = {
@@ -70,11 +68,11 @@ INTRADAY_WEIGHTS_6_12 = {
     "asos_trend": 0.10,
 }
 INTRADAY_WEIGHTS_12_24 = {
-    "hrrr": 0.20,
+    # NAM-MOS removed; its 10% redistributed to HRRR/ECMWF.
+    "hrrr": 0.22,
     "nws_point": 0.25,
     "gfs_mos": 0.20,
-    "ecmwf": 0.25,
-    "nam_mos": 0.10,
+    "ecmwf": 0.33,
 }
 
 # --- Default bias corrections ------------------------------------------------

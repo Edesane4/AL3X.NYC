@@ -314,8 +314,7 @@ class DataSources:
     async def gfs_mos(self, target_date: date) -> SourceResult:
         return await self.mos(cfg.GFS_MOS_URL, "gfs_mos", target_date)
 
-    async def nam_mos(self, target_date: date) -> SourceResult:
-        return await self.mos(cfg.NAM_MOS_URL, "nam_mos", target_date)
+    # NAM-MOS intentionally removed: IEM does not archive NAM-MOS for KNYC.
 
     # ---- Open-Meteo: HRRR + ECMWF --------------------------------------
     async def open_meteo(self, target_date: date, model: str,
@@ -534,21 +533,50 @@ def _extract_knyc_block(text: str) -> Optional[str]:
 
 
 def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
-    """Parse a MAV/MET national bulletin (or KNYC-only text) to find the
-    daily max temperature valid for ``target_date``.
+    """Parse a MAV/MET bulletin to find the daily max temperature valid
+    for ``target_date`` (local Eastern calendar day).
 
-    Robust approach: anchor by character position, not fixed column width.
-      1. Extract the KNYC block.
-      2. On the DT line, record each `/MON DD` token's start column.
-      3. On the X/N line, record each numeric token's start column.
-      4. For each X/N token, its date = the most recent DT token at
-         or before this column's position.
-      5. Return max of X/N values assigned to target_date.day (prefers
-         maxima over minima when both fall on the same day).
+    MAV X/N semantics (documented by NWS MDL):
+      * Each X/N value is reported at the column whose HR equals the
+        END of the 12-hour period it summarizes.
+      * X = max for the local 7 AM – 7 PM window, ending at 00Z UTC
+        of the day AFTER the one it covers (for EDT/EST).
+      * N = min for local 7 PM – 7 AM, ending at 12Z UTC.
+      * X/N values strictly alternate. Which one comes first depends on
+        the run cycle: 12Z/18Z runs start with X, 00Z/06Z runs start
+        with N.
+
+    The robust strategy used here:
+      1. Parse the run time from the header line:
+         ``KNYC   GFS MOS GUIDANCE   M/D/YYYY  HHMM UTC``
+      2. Derive the local-calendar date of the first X in the sequence:
+           - runs at 12Z/18Z UTC: first X covers the run's local day
+           - runs at 00Z/06Z UTC: first X covers the next local day
+      3. Walk the X/N numeric tokens in order and pair them two-at-a-
+         time; the larger of each pair is the X (max). Pairing is
+         robust to whether the sequence starts with X or N since
+         max(X, N) == X in either order.
+      4. x_values[k] is then the max for (first_x_local_date + k days).
+      5. Return ``x_values[(target_date - first_x_local_date).days]``.
     """
     try:
         block = _extract_knyc_block(text) or text
         lines = block.splitlines()
+
+        # Find the header and parse run time (UTC)
+        run_hour_utc: Optional[int] = None
+        run_date_utc: Optional[date] = None
+        for ln in lines[:3]:
+            m = re.search(
+                r"(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{3,4})\s*UTC",
+                ln,
+            )
+            if m:
+                run_date_utc = date(int(m.group(3)),
+                                     int(m.group(1)), int(m.group(2)))
+                run_hour_utc = int(m.group(4)) // 100
+                break
+
         dt_line = None
         xn_line = None
         for ln in lines:
@@ -562,46 +590,57 @@ def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
         if not xn_line:
             return None
 
-        # Locate each /MON DD token on DT line
-        dt_tokens: List[Tuple[int, int]] = []  # (col, day)
-        if dt_line:
-            for m in re.finditer(r"/([A-Z]{3})\s+(\d{1,2})", dt_line):
-                dt_tokens.append((m.start(), int(m.group(2))))
-
-        # Locate each numeric on X/N line (skip the "X/N" label itself)
-        xn_body_start = xn_line.lstrip().find("X/N") + len("X/N")
-        xn_numbers: List[Tuple[int, int]] = []  # (col, value)
-        for m in re.finditer(r"-?\d+", xn_line):
-            if m.start() < len(xn_line) - len(xn_line.lstrip()) + xn_body_start:
-                continue  # inside the "X/N" label — skip
+        # Collect every numeric on the X/N line in order
+        xn_body = xn_line[len(xn_line) - len(xn_line.lstrip()) + len("X/N"):]
+        xn_vals_in_order: List[int] = []
+        for m in re.finditer(r"-?\d+", xn_body):
             try:
-                xn_numbers.append((m.start(), int(m.group(0))))
+                xn_vals_in_order.append(int(m.group(0)))
             except ValueError:
                 continue
 
-        if not xn_numbers:
+        if not xn_vals_in_order:
             return None
 
-        # Assign each X/N number to the day of the most recent DT token
-        # whose column is <= this number's column.
-        def _day_for(col: int) -> Optional[int]:
-            day = None
-            for tcol, d in dt_tokens:
-                if tcol <= col:
-                    day = d
-                else:
-                    break
-            return day
+        # Pair consecutive values and take max per pair → sequence of X values
+        x_values: List[int] = []
+        it = iter(xn_vals_in_order)
+        for a in it:
+            b = next(it, None)
+            if b is None:
+                x_values.append(a)
+            else:
+                x_values.append(max(a, b))
 
-        candidates: List[int] = []
-        for col, v in xn_numbers:
-            if _day_for(col) == target_date.day:
-                candidates.append(v)
-        if candidates:
-            return float(max(candidates))
+        # Compute first_x_local_date from run time. Fall back to "today
+        # local Eastern" if the header couldn't be parsed (legacy tests).
+        if run_hour_utc is not None and run_date_utc is not None:
+            # Use 12Z as a heuristic local-date anchor: for EST (UTC-5) the
+            # run is still on the same local day. For EDT (UTC-4) same.
+            local_run_date = run_date_utc
+            if run_hour_utc < 4:
+                # Late-night UTC = previous local day
+                local_run_date = run_date_utc - timedelta(days=1)
+            if run_hour_utc in (0, 6):
+                first_x_local_date = local_run_date + timedelta(days=1)
+            else:  # 12Z, 18Z
+                first_x_local_date = local_run_date
+        else:
+            first_x_local_date = datetime.now(cfg.EASTERN).date()
 
-        # Fallback: the first X/N value (earliest period in the bulletin)
-        return float(xn_numbers[0][1])
+        days_ahead = (target_date - first_x_local_date).days
+        if 0 <= days_ahead < len(x_values):
+            return float(x_values[days_ahead])
+
+        # Out of range: fall back to the first X value (today's max from a
+        # 12Z/18Z run), so we never return None when the bulletin
+        # clearly has data.
+        if days_ahead < 0 or days_ahead >= len(x_values):
+            log.debug("mos target %s out of bulletin range "
+                      "(first_x=%s, have %d X values)",
+                      target_date, first_x_local_date, len(x_values))
+            return None
+        return float(x_values[0])
     except Exception as e:  # noqa: BLE001
         log.debug("mos parse error: %s", e)
         return None
