@@ -7,8 +7,20 @@ import logging
 import sqlite3
 import threading
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
+
+
+def _utc_now_iso() -> str:
+    """Return current UTC time as a timezone-aware ISO-8601 string.
+
+    Replaces deprecated ``datetime.utcnow()`` (naive) with an aware
+    timestamp like ``2026-04-14T18:30:00.123+00:00``. Old naive rows
+    stored previously in SQLite remain readable: ``fromisoformat()``
+    parses both naive and aware strings since Python 3.11.
+    """
+    return datetime.now(timezone.utc).isoformat()
+
 
 log = logging.getLogger("al3x.storage")
 
@@ -315,7 +327,7 @@ class Storage:
             c.execute(
                 """INSERT OR REPLACE INTO bias_state
                    (key, value, updated_at, reason) VALUES (?,?,?,?)""",
-                (key, value, datetime.utcnow().isoformat(), reason),
+                (key, value, _utc_now_iso(), reason),
             )
 
     def get_biases(self) -> Dict[str, float]:
@@ -328,7 +340,7 @@ class Storage:
             c.execute(
                 """INSERT OR REPLACE INTO source_weights
                    (key,value,updated_at) VALUES (?,?,?)""",
-                (key, value, datetime.utcnow().isoformat()),
+                (key, value, _utc_now_iso()),
             )
 
     def get_weights(self) -> Dict[str, float]:
@@ -341,7 +353,7 @@ class Storage:
         with self._conn() as c:
             c.execute(
                 "INSERT INTO log_events (ts, level, source, message) VALUES (?,?,?,?)",
-                (datetime.utcnow().isoformat(), level, source, message[:4000]),
+                (_utc_now_iso(), level, source, message[:4000]),
             )
 
     def recent_logs(self, limit: int = 100) -> List[Dict]:
@@ -366,7 +378,7 @@ class Storage:
                     row["error_f"],
                     row.get("root_cause"),
                     json.dumps(row.get("detail", {})),
-                    datetime.utcnow().isoformat(),
+                    _utc_now_iso(),
                 ),
             )
 
@@ -386,7 +398,7 @@ class Storage:
                     row["error_f"],
                     int(row["was_helpful"]),
                     row.get("forecast_id"),
-                    datetime.utcnow().isoformat(),
+                    _utc_now_iso(),
                 ),
             )
 

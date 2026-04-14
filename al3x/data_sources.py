@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -266,7 +266,7 @@ class DataSources:
             self._mos_cache = cache
 
         # Cache key is source + current UTC hour → one fetch per hour
-        hour_key = datetime.utcnow().strftime("%Y%m%d%H")
+        hour_key = datetime.now(timezone.utc).strftime("%Y%m%d%H")
         key = f"{source_name}:{hour_key}"
         if key in cache:
             return cache[key].get("text")
@@ -639,7 +639,7 @@ def _parse_cli(text: str) -> Optional[Dict[str, Any]]:
     return {
         "target_date": target_dt.isoformat() if target_dt else None,
         "recorded_high_f": recorded,
-        "posted_at": datetime.utcnow().isoformat(),
+        "posted_at": datetime.now(timezone.utc).isoformat(),
         "raw_text": plain[:4000],
     }
 
