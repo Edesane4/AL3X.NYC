@@ -26,18 +26,16 @@ IEM_ASOS = (
 MDL_MOS = "https://mdl.nws.noaa.gov/api/product/glamos/"
 MDL_NAMMOS = "https://mdl.nws.noaa.gov/api/product/nammos/"
 
-# Canonical MOS sources — NOAA operational FTP over HTTPS. Each URL pattern
-# takes a date string (YYYYMMDD) and a cycle string (CC in {00,06,12,18}).
-# The file contains the FULL national MAV/MET bulletin (~5-10 MB of text);
-# we download once per cycle and extract the KNYC section in memory.
-GFS_MOS_URL_TEMPLATE = (
-    "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod/"
-    "gfsmos.{date}/mdl_gfsmav.t{cycle}z"
-)
-NAM_MOS_URL_TEMPLATE = (
-    "https://nomads.ncep.noaa.gov/pub/data/nccf/com/nam/prod/"
-    "nam_mos.{date}/mdl_nammet.t{cycle}z"
-)
+# Canonical MOS sources — Iowa Environmental Mesonet (mesonet.agron.iastate.edu)
+# serves per-station MAV/MET text bulletins at a simple JSON/text API. IEM has
+# been archiving NWS MOS since 2008 and their endpoint is purpose-built for
+# scripted access (unlike NOAA's FTPPRD/NOMADS which are either unreachable or
+# don't mirror MOS to nomads). The .txt endpoint returns a single-station
+# MAV/MET block we can feed straight to _parse_mos_max().
+GFS_MOS_URL = ("https://mesonet.agron.iastate.edu/api/1/mos.txt"
+               f"?station={STATION_ID}&model=GFS")
+NAM_MOS_URL = ("https://mesonet.agron.iastate.edu/api/1/mos.txt"
+               f"?station={STATION_ID}&model=NAM")
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
 NWS_CLI = (
     "https://forecast.weather.gov/product.php"

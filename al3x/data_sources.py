@@ -251,81 +251,51 @@ class DataSources:
             log.warning("asos fetch failed: %s", e)
             return []
 
-    # ---- GFS-MOS / NAM-MOS ---------------------------------------------
+    # ---- GFS-MOS / NAM-MOS (via IEM) ------------------------------------
     #
-    # The MOS text bulletins we need are published to NOAA's operational FTP
-    # server over HTTPS as full national MAV (GFS) and MET (NAM) files, one
-    # per model cycle (00Z / 06Z / 12Z / 18Z). We download the most recent
-    # available cycle, cache the raw text in-process until the next cycle,
-    # and parse the KNYC block out of it.
-    async def _fetch_mos_bulletin(self, url_template: str,
-                                   source_name: str) -> Optional[str]:
-        """Return the full MOS bulletin text for the most recently posted
-        cycle. Tries the latest cycle and steps backward up to 36 hours if
-        it isn't posted yet. Caches per cycle so intraday cycles reuse
-        the same in-memory copy.
-        """
+    # Iowa Environmental Mesonet hosts a per-station MOS text endpoint that
+    # returns the latest available model run in MAV/MET format — ~2 KB per
+    # request, no cycle-walking, no national-bulletin slicing. We cache the
+    # response in-process for 1 hour so the intraday cycle doesn't re-fetch
+    # on every 15-minute tick.
+    async def _fetch_mos_iem(self, url: str,
+                              source_name: str) -> Optional[str]:
         cache = getattr(self, "_mos_cache", None)
         if cache is None:
             cache: Dict[str, Dict[str, Any]] = {}
             self._mos_cache = cache
 
-        now_utc = datetime.utcnow()
-        # MOS posts ~35 minutes after the run. Pick the latest cycle whose
-        # posting window has elapsed.
-        # cycles per day: 00, 06, 12, 18
-        tried: List[Tuple[str, str]] = []
-        for h_back in range(0, 37, 1):   # look back 0..36 hours
-            t = now_utc - timedelta(hours=h_back)
-            cycle_hour = (t.hour // 6) * 6
-            # skip if this cycle hasn't finished posting yet
-            if cycle_hour == t.hour and t.minute < 40:
-                continue
-            cycle_dt = t.replace(hour=cycle_hour, minute=0, second=0,
-                                 microsecond=0)
-            # don't try a cycle that is in the future
-            if cycle_dt > now_utc:
-                continue
-            date_s = cycle_dt.strftime("%Y%m%d")
-            cycle_s = f"{cycle_hour:02d}"
-            key = f"{source_name}:{date_s}:{cycle_s}"
-            if (date_s, cycle_s) in tried:
-                continue
-            tried.append((date_s, cycle_s))
-            if key in cache:
-                return cache[key].get("text")
+        # Cache key is source + current UTC hour → one fetch per hour
+        hour_key = datetime.utcnow().strftime("%Y%m%d%H")
+        key = f"{source_name}:{hour_key}"
+        if key in cache:
+            return cache[key].get("text")
 
-            url = url_template.format(date=date_s, cycle=cycle_s)
-            try:
-                r = await self._client.get(url, timeout=15.0)
-                if r.status_code == 200 and len(r.text) > 1000:
-                    # Success — cache it. Also drop old cache entries for
-                    # the same source_name to keep memory bounded.
-                    stale = [k for k in cache
-                             if k.startswith(f"{source_name}:") and k != key]
-                    for k in stale:
-                        cache.pop(k, None)
-                    cache[key] = {"text": r.text, "bytes": len(r.text),
-                                  "url": url}
-                    log.info("%s cycle %s/%sZ fetched (%d KB)",
-                             source_name, date_s, cycle_s, len(r.text) // 1024)
-                    return r.text
-                # 404 = cycle not yet posted; try an earlier cycle
-                log.debug("%s %s/%sZ not posted yet (HTTP %s)",
-                          source_name, date_s, cycle_s, r.status_code)
-            except Exception as e:  # noqa: BLE001
-                log.info("%s %s/%sZ fetch error (%s): %s",
-                         source_name, date_s, cycle_s,
-                         type(e).__name__, str(e) or type(e).__name__)
-                # If the connection itself is broken don't hammer further
-                if h_back >= 12:
-                    break
-        return None
+        try:
+            r = await self._client.get(url, timeout=10.0)
+            if r.status_code == 200 and len(r.text) > 200:
+                # Evict older cache entries for this source
+                stale = [k for k in cache
+                         if k.startswith(f"{source_name}:") and k != key]
+                for k in stale:
+                    cache.pop(k, None)
+                cache[key] = {"text": r.text, "bytes": len(r.text), "url": url}
+                log.info("%s fetched from IEM (%d bytes)",
+                         source_name, len(r.text))
+                return r.text
+            log.info("%s IEM returned HTTP %s (len=%d)",
+                     source_name, r.status_code, len(r.text))
+            return None
+        except Exception as e:  # noqa: BLE001
+            msg = str(e) or type(e).__name__
+            log.info("%s IEM fetch error (%s): %s",
+                     source_name, type(e).__name__, msg)
+            return None
 
-    async def mos(self, url_template: str, source_name: str,
+    async def mos(self, url: str, source_name: str,
                   target_date: date) -> SourceResult:
         try:
-            txt = await self._fetch_mos_bulletin(url_template, source_name)
+            txt = await self._fetch_mos_iem(url, source_name)
             if not txt:
                 return SourceResult(source_name, error="no bulletin fetched")
             val = _parse_mos_max(txt, target_date)
@@ -342,12 +312,10 @@ class DataSources:
             return SourceResult(source_name, error=f"{type(e).__name__}: {msg}")
 
     async def gfs_mos(self, target_date: date) -> SourceResult:
-        return await self.mos(cfg.GFS_MOS_URL_TEMPLATE,
-                              "gfs_mos", target_date)
+        return await self.mos(cfg.GFS_MOS_URL, "gfs_mos", target_date)
 
     async def nam_mos(self, target_date: date) -> SourceResult:
-        return await self.mos(cfg.NAM_MOS_URL_TEMPLATE,
-                              "nam_mos", target_date)
+        return await self.mos(cfg.NAM_MOS_URL, "nam_mos", target_date)
 
     # ---- Open-Meteo: HRRR + ECMWF --------------------------------------
     async def open_meteo(self, target_date: date, model: str,
