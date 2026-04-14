@@ -205,20 +205,29 @@ class DataSources:
     # ---- GFS-MOS / NAM-MOS ---------------------------------------------
     async def mos(self, product_url: str, source_name: str,
                   target_date: date) -> SourceResult:
+        # Short timeout: MDL endpoints are known to hang intermittently,
+        # and MOS is optional — the ensemble re-weights without it.
         try:
             r = await self._client.get(
                 product_url,
                 params={"stationId": cfg.STATION_ID},
+                timeout=5.0,
             )
             r.raise_for_status()
             txt = r.text
             val = _parse_mos_max(txt, target_date)
             if val is None:
+                log.info("%s: endpoint responded but no X/N parsed "
+                         "(%d bytes)", source_name, len(txt))
                 return SourceResult(source_name, error="no max field parsed")
             return SourceResult(source_name, value=val, meta={"raw_len": len(txt)})
         except Exception as e:  # noqa: BLE001
-            log.warning("%s fetch failed: %s", source_name, e)
-            return SourceResult(source_name, error=str(e))
+            # MOS endpoints (mdl.nws.noaa.gov) are flaky — don't surface as
+            # a WARNING (would spam Telegram). Downgrade to INFO.
+            msg = str(e) or type(e).__name__
+            log.info("%s fetch skipped (%s): %s",
+                     source_name, type(e).__name__, msg)
+            return SourceResult(source_name, error=f"{type(e).__name__}: {msg}")
 
     async def gfs_mos(self, target_date: date) -> SourceResult:
         return await self.mos(cfg.MDL_MOS, "gfs_mos", target_date)
