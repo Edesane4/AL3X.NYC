@@ -113,7 +113,9 @@ class TelegramNotifier:
                     self._consecutive_fail = 0
             except Exception as e:  # noqa: BLE001
                 self._consecutive_fail += 1
-                log.warning("telegram send failed: %s", e)
+                msg = str(e) or type(e).__name__
+                log.warning("telegram send failed (%s): %s",
+                            type(e).__name__, msg)
 
     async def _worker(self) -> None:
         while True:

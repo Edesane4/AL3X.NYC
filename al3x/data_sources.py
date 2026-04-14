@@ -55,6 +55,10 @@ class DataSources:
             follow_redirects=True,
         )
         self._points_cache: Optional[Dict[str, str]] = None
+        # Async lock: only one /points/ lookup at a time (three NWS tasks
+        # race each other on the first cycle otherwise).
+        import asyncio as _asyncio
+        self._points_lock = _asyncio.Lock()
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -63,16 +67,19 @@ class DataSources:
         """Resolve the dynamic /points/{lat},{lon} endpoint (once)."""
         if self._points_cache:
             return self._points_cache
-        url = f"https://api.weather.gov/points/{cfg.LAT},{cfg.LON}"
-        r = await self._client.get(url)
-        r.raise_for_status()
-        props = r.json().get("properties", {})
-        self._points_cache = {
-            "forecast": props.get("forecast"),
-            "forecastHourly": props.get("forecastHourly"),
-            "forecastGridData": props.get("forecastGridData"),
-        }
-        return self._points_cache
+        async with self._points_lock:
+            if self._points_cache:
+                return self._points_cache
+            url = f"https://api.weather.gov/points/{cfg.LAT},{cfg.LON}"
+            r = await self._client.get(url)
+            r.raise_for_status()
+            props = r.json().get("properties", {})
+            self._points_cache = {
+                "forecast": props.get("forecast"),
+                "forecastHourly": props.get("forecastHourly"),
+                "forecastGridData": props.get("forecastGridData"),
+            }
+            return self._points_cache
 
     # ---- NWS point forecast (hourly) ------------------------------------
     async def nws_hourly_max(self, target_date: date) -> SourceResult:
@@ -356,7 +363,9 @@ class DataSources:
         - if the preferred model fails or returns no data, fall back to
           best_match and log a specific warning.
         """
-        primary = "ncep_hrrr" if lead_hours < 18 else "gfs_seamless"
+        # Open-Meteo's HRRR is served under the gfs_hrrr model id (not
+        # ncep_hrrr — that returns 400 Bad Request).
+        primary = "gfs_hrrr" if lead_hours < 18 else "gfs_seamless"
         res = await self.open_meteo(target_date, primary, "hrrr",
                                     also_obs=also_obs)
         if res.value is not None:
