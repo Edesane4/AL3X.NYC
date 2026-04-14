@@ -632,15 +632,11 @@ def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
         if 0 <= days_ahead < len(x_values):
             return float(x_values[days_ahead])
 
-        # Out of range: fall back to the first X value (today's max from a
-        # 12Z/18Z run), so we never return None when the bulletin
-        # clearly has data.
-        if days_ahead < 0 or days_ahead >= len(x_values):
-            log.debug("mos target %s out of bulletin range "
-                      "(first_x=%s, have %d X values)",
-                      target_date, first_x_local_date, len(x_values))
-            return None
-        return float(x_values[0])
+        # Returns None if target date is outside the bulletin range.
+        log.debug("mos target %s out of bulletin range "
+                  "(first_x=%s, have %d X values)",
+                  target_date, first_x_local_date, len(x_values))
+        return None
     except Exception as e:  # noqa: BLE001
         log.debug("mos parse error: %s", e)
         return None

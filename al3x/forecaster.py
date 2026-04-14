@@ -146,6 +146,7 @@ def _detect_regime(hourly: List[Dict[str, Any]],
     precip_probs_peak = []
     wind_speeds = []
     dir_during_afternoon = []
+    grid_dir_afternoon: List[float] = []  # hoisted so final assembly can see it
 
     def parse_wind(s: Optional[str]) -> Optional[float]:
         if not s:
@@ -256,7 +257,6 @@ def _detect_regime(hourly: List[Dict[str, Any]],
         grid_cloud_afternoon: List[float] = []
         grid_precip_peak: List[float] = []
         grid_wind_kt: List[float] = []
-        grid_dir_afternoon: List[float] = []
         for g in grid_hourly:
             t = g.get("time")
             if not t:
@@ -302,11 +302,14 @@ def _detect_regime(hourly: List[Dict[str, Any]],
         if grid_wind_kt:
             max_wind = max(max_wind, max(grid_wind_kt))
             sustained_windy = max_wind >= 15
-        # Sea breeze from quantitative direction (S=180±45, SE=135±22.5)
+        # Sea breeze from quantitative direction (S=180±45, SE=135±22.5).
+        # BUG 3 — `all()` over an empty iterable returns True, so we must
+        # guard the NW-all-day check on grid_dir_afternoon being non-empty.
         if grid_dir_afternoon:
             if any(120 <= d <= 210 for d in grid_dir_afternoon):
                 sea_breeze_shift = True
-            if all(d >= 270 or d <= 45 for d in grid_dir_afternoon):
+            if (grid_dir_afternoon
+                    and all(d >= 270 or d <= 45 for d in grid_dir_afternoon)):
                 wind_nw_all_day = True
 
     # Re-evaluate calm_clear with possibly-updated cloud/wind signals
@@ -316,8 +319,11 @@ def _detect_regime(hourly: List[Dict[str, Any]],
     return {
         "sea_breeze_shift": sea_breeze_shift,
         "sea_breeze_full": sea_breeze_full,
-        "wind_nw_all_day": wind_nw_all_day and bool(dir_during_afternoon
-                                                     or (grid_hourly or [])),
+        # BUG 3 — require actual afternoon directional evidence. Don't fall
+        # back to "grid_hourly exists" because grid_hourly can be non-empty
+        # even when it contains zero wind_direction entries.
+        "wind_nw_all_day": wind_nw_all_day and (bool(dir_during_afternoon)
+                                                  or bool(grid_dir_afternoon)),
         "cloud_morning_increase": cloud_morning_increase,
         "cloud_afternoon_clearing": cloud_afternoon_clearing,
         "any_precip_peak": any_precip_peak,
@@ -443,8 +449,15 @@ class Forecaster:
     def _live_weights(self, mode: str, lead_hours: float) -> Dict[str, float]:
         base = _weights_for_mode(mode, lead_hours)
         stored = self.storage.get_weights()
-        # stored keys like "night_before:hrrr" or "intraday:hrrr"
-        prefix = "night_before" if mode == "night_before" else "intraday"
+        # Unique prefix per window matches learning._LEGACY_MAP
+        if mode == "night_before":
+            prefix = "nb"
+        elif lead_hours <= 6:
+            prefix = "id06"
+        elif lead_hours <= 12:
+            prefix = "id612"
+        else:
+            prefix = "id1224"
         for k in list(base.keys()):
             sk = f"{prefix}:{k}"
             if sk in stored:
@@ -511,16 +524,42 @@ class Forecaster:
                 obs_today, nws_r.meta.get("hourly", []), target_date,
             )
 
-        # Superior Quality 1 — Kalman tracker on intraday temperature state
+        # Superior Quality 1 — Kalman tracker on intraday temperature state.
+        # Quant 2 — climatological rate-of-rise prior for stability early
+        #           in the day (<4h of obs).
+        # Math Gap 2 — soft ceiling against HRRR's forecast peak to
+        #              prevent runaway linear projection.
         kalman_result = None
         if mode == "intraday" and len(obs_today) >= 3:
             try:
                 from .kalman_tracker import project_daily_max
+                from .climatology import RateClimatology
+                clim = RateClimatology()
+                try:
+                    clim.build(self.storage)
+                except Exception as e:  # noqa: BLE001
+                    log.info("climatology build error: %s", e)
+                # Provisional regime-free sky/wind averages from obs_today
+                _sky_vals = [o.get("sky_cover_pct") for o in obs_today
+                             if o.get("sky_cover_pct") is not None]
+                _wind_vals = [o.get("wind_speed_kt") for o in obs_today
+                              if o.get("wind_speed_kt") is not None]
+                prior_rate = clim.get_prior_rate(
+                    target_date.month,
+                    (sum(_sky_vals) / len(_sky_vals)) if _sky_vals else None,
+                    (sum(_wind_vals) / len(_wind_vals)) if _wind_vals else None,
+                )
+                hrrr_peak_f = (hrrr_r.meta.get("raw_max_f")
+                               if hrrr_r.meta else None)
+                if hrrr_peak_f is None:
+                    hrrr_peak_f = hrrr_r.value
                 kalman_result = project_daily_max(
                     obs_today,
                     hrrr_r.meta.get("hourly_today"),
                     running_max_f,
                     None,
+                    hrrr_peak_f=hrrr_peak_f,
+                    prior_rate=prior_rate,
                 )
                 if kalman_result:
                     raw_values["kalman"] = kalman_result["projected_max_f"]
@@ -539,12 +578,40 @@ class Forecaster:
             weights = {k: v * scale for k, v in weights.items() if k != "kalman"}
             weights["kalman"] = kw
 
+            # BUG 6 — cap Kalman's effective weight. _weighted_mean will
+            # re-normalize over only present sources, which can push
+            # Kalman above its intended blend_weight ceiling when other
+            # sources drop out. Enforce an absolute ceiling here and
+            # redistribute any overflow proportionally.
+            MAX_KALMAN_WEIGHT = 0.60
+            if weights["kalman"] > MAX_KALMAN_WEIGHT:
+                overflow = weights["kalman"] - MAX_KALMAN_WEIGHT
+                weights["kalman"] = MAX_KALMAN_WEIGHT
+                others = {k: v for k, v in weights.items() if k != "kalman"}
+                others_total = sum(others.values()) or 1.0
+                for k in others:
+                    weights[k] += overflow * (others[k] / others_total)
+
         raw_ensemble, views = _weighted_mean(source_values, weights)
 
         contrib_vals = [v.value for v in views.values()
                         if v.value is not None and v.weight > 0]
         spread = ((max(contrib_vals) - min(contrib_vals))
                   if contrib_vals else 0.0)
+
+        # Quant 1 — Bayesian Model Averaging. If we have enough history,
+        # replace the plain weighted mean with the bias-corrected BMA
+        # forecast and use its predictive variance to size uncertainty.
+        bma_result = None
+        try:
+            from .bma import compute_bma
+            bma_result = compute_bma(
+                source_values, weights, self.storage, target_date, mode,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info("BMA unavailable: %s", e)
+        if bma_result is not None:
+            raw_ensemble = float(bma_result["bma_forecast_f"])
 
         # Corrections — regime now gets obs_today (Bug 1) + grid data (Gap 1)
         bias = self._live_bias()
@@ -560,8 +627,46 @@ class Forecaster:
 
         final = raw_ensemble + total_delta
 
+        # Quant 3 — analog pattern matching applied after bias corrections
+        # but BEFORE AI calibration (per directive pipeline order).
+        analog_result = None
+        try:
+            from .analog_engine import build_feature_vector, find_analogs
+            # Pull regime-extracted proxies for the feature vector
+            dewpoint = None
+            wind_speed = None
+            for o in reversed(obs_today or []):
+                if dewpoint is None and o.get("dewpoint_f") is not None:
+                    dewpoint = o["dewpoint_f"]
+                if wind_speed is None and o.get("wind_speed_kt") is not None:
+                    wind_speed = o["wind_speed_kt"]
+                if dewpoint is not None and wind_speed is not None:
+                    break
+            precip_prob = None
+            grid_rows = (grid_r.meta.get("hourly_grid")
+                         if grid_r and grid_r.meta else None)
+            if grid_rows:
+                peaks = [row.get("precip_prob_pct") for row in grid_rows
+                         if row.get("precip_prob_pct") is not None]
+                if peaks:
+                    precip_prob = max(peaks)
+            fv = build_feature_vector(
+                hrrr_forecast_f=hrrr_r.value if hrrr_r else None,
+                dewpoint_f=dewpoint,
+                wind_speed_kt=wind_speed,
+                precip_prob_pct=precip_prob,
+                sky_cover_pct=regime.get("cloud_avg"),
+                month=target_date.month,
+                lead_hours=lead_hours,
+            )
+            analog_result = find_analogs(fv, self.storage)
+        except Exception as e:  # noqa: BLE001
+            log.info("analog engine unavailable: %s", e)
+        if analog_result is not None:
+            final = final + analog_result.get("analog_bias_f", 0.0)
+
         # Gap 5 — Claude AI calibration layer (optional). Applied after
-        # bias corrections, before running-max floor.
+        # bias corrections and analog bias, before the running-max floor.
         ai_result = {"delta_f": 0.0, "confidence": 0.0,
                      "reasoning": "AI layer not configured", "source": "disabled"}
         if self.ai_calibrator is not None:
@@ -595,14 +700,17 @@ class Forecaster:
         if mode == "intraday" and running_max_f is not None:
             final = max(final, running_max_f)
 
-        # Uncertainty
-        uncertainty = 2.0
-        if spread >= 6:
-            uncertainty += 2.0
-        elif spread <= 3:
-            uncertainty = max(1.0, uncertainty - 1.0)
-        if mode == "intraday" and lead_hours <= 3:
-            uncertainty = max(0.5, uncertainty - 1.0)
+        # Uncertainty — prefer BMA's calibrated sigma when available.
+        if bma_result is not None:
+            uncertainty = float(bma_result["bma_variance_f"])
+        else:
+            uncertainty = 2.0
+            if spread >= 6:
+                uncertainty += 2.0
+            elif spread <= 3:
+                uncertainty = max(1.0, uncertainty - 1.0)
+            if mode == "intraday" and lead_hours <= 3:
+                uncertainty = max(0.5, uncertainty - 1.0)
 
         revision = self.storage.last_revision(target_date.isoformat(), mode) + 1 \
             if mode == "intraday" else 0
@@ -642,6 +750,8 @@ class Forecaster:
             "weights_used": weights,
             "kalman": kalman_result,
             "ai_calibration": ai_result,
+            "bma": bma_result,
+            "analog": analog_result,
         }
 
         return {

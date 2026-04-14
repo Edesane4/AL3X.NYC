@@ -178,6 +178,50 @@ class Storage:
                 # race). _init_schema will handle it on a real file DB.
                 pass
 
+            # BUG 1 migration — split any legacy "intraday:{source}" weights
+            # into three unique prefixes (id06/id612/id1224) if the new keys
+            # don't already exist. Safe to run repeatedly.
+            try:
+                rows = c.execute(
+                    "SELECT key, value FROM source_weights "
+                    "WHERE key LIKE 'intraday:%'"
+                ).fetchall()
+                for r in rows:
+                    src = r["key"].split(":", 1)[1]
+                    for new_prefix in ("id06", "id612", "id1224"):
+                        new_key = f"{new_prefix}:{src}"
+                        exists = c.execute(
+                            "SELECT 1 FROM source_weights WHERE key=?",
+                            (new_key,),
+                        ).fetchone()
+                        if not exists:
+                            c.execute(
+                                "INSERT INTO source_weights "
+                                "(key, value, updated_at) VALUES (?,?,?)",
+                                (new_key, float(r["value"]),
+                                 _utc_now_iso()),
+                            )
+                # Also promote legacy "night_before:{src}" → "nb:{src}"
+                rows = c.execute(
+                    "SELECT key, value FROM source_weights "
+                    "WHERE key LIKE 'night_before:%'"
+                ).fetchall()
+                for r in rows:
+                    src = r["key"].split(":", 1)[1]
+                    new_key = f"nb:{src}"
+                    exists = c.execute(
+                        "SELECT 1 FROM source_weights WHERE key=?",
+                        (new_key,),
+                    ).fetchone()
+                    if not exists:
+                        c.execute(
+                            "INSERT INTO source_weights "
+                            "(key, value, updated_at) VALUES (?,?,?)",
+                            (new_key, float(r["value"]), _utc_now_iso()),
+                        )
+            except sqlite3.OperationalError:
+                pass
+
     # -- forecasts ---------------------------------------------------------
     def save_forecast(self, row: Dict[str, Any]) -> int:
         with self._conn() as c:
@@ -401,6 +445,90 @@ class Storage:
                     _utc_now_iso(),
                 ),
             )
+
+    # -- helpers for BMA / climatology / analog engine -------------------
+    def get_source_history(self, source_name: str,
+                            days: int = 30) -> List[Dict]:
+        """Return (target_date, predicted_f, cli_f) for one source across
+        the last `days` verified days.
+
+        Joins forecasts.sources_json with cli_truth. Only returns rows
+        where we have both a predicted value and a CLI truth.
+        """
+        rows: List[Dict] = []
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT f.target_date AS target_date, "
+                "       f.mode AS mode, "
+                "       f.sources_json AS sources_json, "
+                "       t.recorded_high_f AS cli_f "
+                "FROM forecasts f "
+                "JOIN cli_truth t ON t.target_date = f.target_date "
+                "WHERE f.target_date >= date('now', ?) "
+                "ORDER BY f.target_date DESC, f.id DESC",
+                (f"-{days} days",),
+            ).fetchall()
+        for row in r:
+            try:
+                srcs = json.loads(row["sources_json"] or "{}")
+            except Exception:
+                continue
+            payload = srcs.get(source_name) or {}
+            v = payload.get("value")
+            if v is None:
+                continue
+            rows.append({
+                "target_date": row["target_date"],
+                "mode": row["mode"],
+                "predicted_f": float(v),
+                "cli_f": float(row["cli_f"]),
+            })
+        return rows
+
+    def observations_all_days(self, limit_days: int = 365) -> List[Dict]:
+        """Return every observation from the last N days (no date filter
+        beyond the cutoff). Used by RateClimatology."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM observations "
+                "WHERE observed_at >= datetime('now', ?) "
+                "ORDER BY observed_at ASC",
+                (f"-{limit_days} days",),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def forecasts_with_truth(self, days: int = 365) -> List[Dict]:
+        """Return forecast rows joined with their CLI truth, for the
+        analog engine. Most recent one forecast per day is returned
+        (prefers intraday over night_before when both exist)."""
+        out: List[Dict] = []
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT f.*, t.recorded_high_f AS cli_f "
+                "FROM forecasts f "
+                "JOIN cli_truth t ON t.target_date = f.target_date "
+                "WHERE f.target_date >= date('now', ?) "
+                "ORDER BY f.target_date DESC, f.id DESC",
+                (f"-{days} days",),
+            ).fetchall()
+        seen_dates: set = set()
+        for r in rows:
+            d = dict(r)
+            # Parse JSON columns like _forecast_row
+            for k in ("sources_json", "corrections_json", "extras_json"):
+                if d.get(k):
+                    try:
+                        d[k.replace("_json", "")] = json.loads(d[k])
+                    except Exception:
+                        d[k.replace("_json", "")] = {}
+                    d.pop(k, None)
+            # First row per date wins (ordered DESC by id so we take the
+            # latest intraday or night-before).
+            if d["target_date"] in seen_dates:
+                continue
+            seen_dates.add(d["target_date"])
+            out.append(d)
+        return out
 
     def attribution_rows(self, days: int = 30) -> List[Dict]:
         with self._conn() as c:

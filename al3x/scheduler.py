@@ -156,6 +156,11 @@ class AgentScheduler:
         now = datetime.now(cfg.EASTERN)
         tomorrow = (now + timedelta(days=1)).date()
         key = tomorrow.isoformat()
+        # BUG 7 — prune entries older than 2 days so this dict never grows
+        cutoff = (now - timedelta(days=2)).date().isoformat()
+        self._night_before_runs = {
+            k: v for k, v in self._night_before_runs.items() if k >= cutoff
+        }
         runs_done = self._night_before_runs.get(key, 0)
 
         if not forced:

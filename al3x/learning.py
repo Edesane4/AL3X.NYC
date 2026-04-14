@@ -15,20 +15,21 @@ log = logging.getLogger("al3x.learning")
 
 
 # Named weight sets matching cfg.*_WEIGHTS so retune_weights can round-trip
-# them cleanly. The persisted key scheme is "<set>:<source>".
+# them cleanly. Each weight set has its own unique storage prefix so the
+# three intraday windows no longer overwrite each other (BUG 1).
 _WEIGHT_SETS: Dict[str, Dict[str, float]] = {
     "night_before": cfg.NIGHT_BEFORE_WEIGHTS,
     "intraday_0_6": cfg.INTRADAY_WEIGHTS_0_6,
     "intraday_6_12": cfg.INTRADAY_WEIGHTS_6_12,
     "intraday_12_24": cfg.INTRADAY_WEIGHTS_12_24,
 }
-# Legacy keys preserved so the Forecaster._live_weights lookup still finds
-# the tuned weights under "night_before:..." / "intraday:...".
+# Unique storage prefix per weight set. The Forecaster looks up these
+# prefixes directly (no legacy collapse). Kept as a dict for discoverability.
 _LEGACY_MAP = {
-    "night_before": "night_before",
-    "intraday_0_6": "intraday",
-    "intraday_6_12": "intraday",
-    "intraday_12_24": "intraday",
+    "night_before": "nb",
+    "intraday_0_6": "id06",
+    "intraday_6_12": "id612",
+    "intraday_12_24": "id1224",
 }
 
 
@@ -180,9 +181,9 @@ class Learning:
 
             # 30/70 blend with current (stored) weights
             current_stored = self.storage.get_weights()
-            legacy_prefix = _LEGACY_MAP[set_name]
+            prefix = _LEGACY_MAP[set_name]
             for src, default_w in default_weights.items():
-                stored_key = f"{legacy_prefix}:{src}"
+                stored_key = f"{prefix}:{src}"
                 cur = current_stored.get(stored_key, default_w)
                 new_weights[src] = 0.7 * cur + 0.3 * target.get(src, default_w)
 
@@ -200,10 +201,10 @@ class Learning:
             for src in new_weights:
                 new_weights[src] = new_weights[src] / total
 
-            # Persist (legacy key) + per-set key
+            # Persist under the unique prefix only — no legacy "intraday:"
+            # collapse that was silently overwriting neighboring windows.
             for src, w in new_weights.items():
-                self.storage.set_weight(f"{legacy_prefix}:{src}", w)
-                self.storage.set_weight(f"{set_name}:{src}", w)
+                self.storage.set_weight(f"{prefix}:{src}", w)
             changes[set_name] = {k: round(v, 3) for k, v in new_weights.items()}
 
         return {"ok": True, "mae": {k: round(v, 2) for k, v in mae.items()},

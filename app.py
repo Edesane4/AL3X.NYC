@@ -147,12 +147,14 @@ async def history(days: int = 30):
 
 @app.post("/api/force/night_before")
 async def force_night_before():
-    await app.state.agent.night_before_cycle()
+    # BUG 2 — manual API triggers must bypass the 3-run cap
+    await app.state.agent.night_before_cycle(forced=True)
     return {"ok": True}
 
 
 @app.post("/api/force/intraday")
 async def force_intraday():
+    # intraday_cycle guards on high_locked; this always runs a refresh
     await app.state.agent.intraday_cycle()
     return {"ok": True}
 

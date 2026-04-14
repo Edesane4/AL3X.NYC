@@ -42,7 +42,9 @@ def _parse_dt(iso_ts: str) -> Optional[datetime]:
 def project_daily_max(obs_today: List[Dict[str, Any]],
                        hrrr_hourly: Optional[Sequence[Tuple[float, float]]],
                        running_max_f: Optional[float],
-                       ensemble_value_f: Optional[float]
+                       ensemble_value_f: Optional[float],
+                       hrrr_peak_f: Optional[float] = None,
+                       prior_rate: Optional[float] = None
                        ) -> Optional[Dict[str, Any]]:
     """Return {"projected_max_f", "kalman_uncertainty_f", "hours_of_data_used",
     "blend_weight"} or None.
@@ -115,6 +117,15 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
     current_hour = now.hour + now.minute / 60.0
     hours_to_peak = peak_hour - current_hour
 
+    # Climatological rate prior blending (Quant 2). As hours_of_data grows,
+    # trust the Kalman rate more; when data is thin, lean on climatology.
+    hours_of_data = (valid[-1][0] - valid[0][0]).total_seconds() / 3600.0
+    prior_used = False
+    if prior_rate is not None:
+        alpha = min(0.95, 0.3 + 0.065 * hours_of_data)
+        rate = alpha * rate + (1 - alpha) * float(prior_rate)
+        prior_used = True
+
     # Projection rule:
     #  - rate>0 and haven't hit peak: linearly extrapolate
     #  - rate<=0 and past 1 PM: use running_max as the projected peak
@@ -126,10 +137,20 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
     else:
         projected = temp + max(rate, 0.0) * max(hours_to_peak, 0.0)
 
+    # MATH GAP 2 — soft HRRR ceiling. The linear Kalman projection can
+    # overshoot when the temperature curve flattens before the peak.
+    # Blend toward HRRR's peak (with weight growing as we accumulate data)
+    # and hard-cap at HRRR+3 °F.
+    ceiling_weight = None
+    if hrrr_peak_f is not None:
+        ceiling_weight = min(0.7, 0.2 + 0.05 * hours_of_data)
+        projected = ((1 - ceiling_weight) * projected
+                     + ceiling_weight * max(projected, float(hrrr_peak_f)))
+        projected = min(projected, float(hrrr_peak_f) + 3.0)
+
     if running_max_f is not None:
         projected = max(projected, running_max_f)
 
-    hours_of_data = (valid[-1][0] - valid[0][0]).total_seconds() / 3600.0
     if hours_of_data < 4.0:
         blend_weight = 0.15
     elif hours_of_data < 8.0:
@@ -145,6 +166,8 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
         "current_temp_f": float(temp),
         "rate_f_per_hr": float(rate),
         "peak_hour": float(peak_hour),
+        "ceiling_weight": ceiling_weight,
+        "prior_rate_used": prior_used,
     }
 
 
