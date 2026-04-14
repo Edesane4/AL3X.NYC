@@ -532,33 +532,75 @@ def _extract_knyc_block(text: str) -> Optional[str]:
     return "\n".join(lines[start:end])
 
 
-def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
-    """Parse a MAV/MET bulletin to find the daily max temperature valid
-    for ``target_date`` (local Eastern calendar day).
+def _parse_mos_csv(text: str, target_date: date) -> Optional[float]:
+    """Parse IEM's CSV MOS response.
 
-    MAV X/N semantics (documented by NWS MDL):
-      * Each X/N value is reported at the column whose HR equals the
-        END of the 12-hour period it summarizes.
-      * X = max for the local 7 AM – 7 PM window, ending at 00Z UTC
-        of the day AFTER the one it covers (for EDT/EST).
-      * N = min for local 7 PM – 7 AM, ending at 12Z UTC.
-      * X/N values strictly alternate. Which one comes first depends on
-        the run cycle: 12Z/18Z runs start with X, 00Z/06Z runs start
-        with N.
-
-    The robust strategy used here:
-      1. Parse the run time from the header line:
-         ``KNYC   GFS MOS GUIDANCE   M/D/YYYY  HHMM UTC``
-      2. Derive the local-calendar date of the first X in the sequence:
-           - runs at 12Z/18Z UTC: first X covers the run's local day
-           - runs at 00Z/06Z UTC: first X covers the next local day
-      3. Walk the X/N numeric tokens in order and pair them two-at-a-
-         time; the larger of each pair is the X (max). Pairing is
-         robust to whether the sequence starts with X or N since
-         max(X, N) == X in either order.
-      4. x_values[k] is then the max for (first_x_local_date + k days).
-      5. Return ``x_values[(target_date - first_x_local_date).days]``.
+    Format (per https://mesonet.agron.iastate.edu/api/ ):
+      station,model,runtime,ftime,n_x,tmp,dpt,cld,wdr,wsp, ...
+    where `ftime` is an ISO UTC timestamp and `tmp` is the hourly forecast
+    temperature in °F. The `n_x` column is the X/N field but is sparsely
+    populated (sometimes missing the first X for the in-progress day), so
+    we bypass it and compute max(tmp) directly over the target-date's
+    local daytime window (6 AM – 11 PM Eastern).
     """
+    try:
+        import csv, io
+        reader = csv.DictReader(io.StringIO(text))
+        # Target window in UTC: 6 AM local = 10/11 UTC (depending on DST);
+        # use a generous 09–04 UTC window to cover both EST and EDT. The
+        # far side of that window rolls into the next UTC date, so we
+        # match against the *local* date of ftime.
+        candidates: List[float] = []
+        for row in reader:
+            ft = (row.get("ftime") or "").strip()
+            tmp_s = (row.get("tmp") or "").strip()
+            if not ft or not tmp_s:
+                continue
+            # ftime is space-separated UTC timestamp "YYYY-MM-DD HH:MM"
+            try:
+                dt_utc = datetime.fromisoformat(ft).replace(
+                    tzinfo=timezone.utc)
+            except Exception:
+                continue
+            dt_local = dt_utc.astimezone(cfg.EASTERN)
+            if dt_local.date() != target_date:
+                continue
+            # Daytime window only
+            if dt_local.hour < 6 or dt_local.hour > 22:
+                continue
+            try:
+                candidates.append(float(tmp_s))
+            except ValueError:
+                continue
+        if not candidates:
+            return None
+        return float(max(candidates))
+    except Exception as e:  # noqa: BLE001
+        log.debug("mos csv parse error: %s", e)
+        return None
+
+
+def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
+    """Parse a MOS bulletin (either IEM CSV or raw MAV text) for the
+    daily max at target_date (local Eastern calendar day).
+
+    Tries CSV first (IEM's format since ~2020), falls back to MAV text
+    parsing for any source that still serves the classic NWS bulletin.
+    """
+    # Detect IEM CSV by the first non-blank line being a header
+    head = ""
+    for ln in text.splitlines()[:3]:
+        s = ln.strip()
+        if s:
+            head = s.lower()
+            break
+    if head.startswith("station,model,runtime,ftime"):
+        csv_result = _parse_mos_csv(text, target_date)
+        if csv_result is not None:
+            return csv_result
+        # If CSV parse produced nothing, fall through to MAV attempt
+
+    # --- Fallback: legacy MAV/MET text bulletin parser ---
     try:
         block = _extract_knyc_block(text) or text
         lines = block.splitlines()
