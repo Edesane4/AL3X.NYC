@@ -8,3 +8,7 @@ pytz>=2024.2
 jinja2>=3.1
 scipy>=1.13
 anthropic>=0.28
+scikit-learn>=1.4
+quantile-forest>=1.2  # optional; sklearn fallback used if not installed
+gspread>=6.0
+google-auth>=2.0

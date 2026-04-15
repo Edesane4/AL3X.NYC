@@ -103,6 +103,19 @@ async def state():
     learning = Learning(storage)
     stats = learning.headline_stats()
     attribution = learning.attribution_stats(days=30)
+    # Regime-shift history (Quant Upgrade 3)
+    try:
+        regime_shifts = storage.recent_regime_shifts(days=7)
+    except Exception:
+        regime_shifts = []
+    # QRF calibration diagnostics (Quant Upgrade 1)
+    qrf_stats = None
+    try:
+        qrf = getattr(app.state.agent.forecaster, "_qrf", None)
+        if qrf is not None:
+            qrf_stats = qrf.calibration_stats(storage)
+    except Exception:
+        qrf_stats = None
 
     # Running max from obs
     running_max_f = None
@@ -124,6 +137,8 @@ async def state():
         "running_max_today_f": running_max_f,
         "stats": stats,
         "attribution": attribution,
+        "regime_shifts": regime_shifts,
+        "qrf_calibration": qrf_stats,
         "ai_enabled": bool(getattr(app.state, "ai_calibrator", None)
                            and app.state.ai_calibrator.enabled),
         "weights_override": storage.get_weights(),

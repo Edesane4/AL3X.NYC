@@ -131,7 +131,15 @@ class Learning:
             })
 
     # ---- Gap 2 — inverse-MAE weight retune across all 4 weight sets -----
-    def retune_weights(self) -> Dict[str, Any]:
+    def retune_weights(self, blend_alpha: float = 0.30) -> Dict[str, Any]:
+        """Retune source weights using inverse-MAE targets blended with
+        current weights.
+
+        ``blend_alpha`` controls how aggressively we move toward the new
+        MAE-optimal weights:
+          * 0.30 (default) = normal weekly retune (70% keep, 30% new)
+          * 0.50 (regime shift) = react faster when conditions change
+        """
         scores = self.storage.recent_scores(days=7)
         if len(scores) < 5:
             return {"ok": False, "reason": "insufficient history"}
@@ -179,13 +187,18 @@ class Learning:
                 else:
                     target[src] = (1.0 / max(mae_src, EPS)) / inv_sum
 
-            # 30/70 blend with current (stored) weights
+            # Blend with current (stored) weights. Default alpha=0.30 ⇒
+            # 70% keep, 30% move. Regime-shift callers pass alpha=0.50 for
+            # twice as aggressive adaptation.
             current_stored = self.storage.get_weights()
             prefix = _LEGACY_MAP[set_name]
             for src, default_w in default_weights.items():
                 stored_key = f"{prefix}:{src}"
                 cur = current_stored.get(stored_key, default_w)
-                new_weights[src] = 0.7 * cur + 0.3 * target.get(src, default_w)
+                new_weights[src] = (
+                    (1.0 - blend_alpha) * cur
+                    + blend_alpha * target.get(src, default_w)
+                )
 
             # Clamp: no source > 0.50, no source < 0.05
             for src in list(new_weights):

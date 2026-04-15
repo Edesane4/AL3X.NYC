@@ -124,6 +124,30 @@ CREATE TABLE IF NOT EXISTS correction_attribution (
 );
 CREATE INDEX IF NOT EXISTS idx_attr_date ON correction_attribution(target_date);
 CREATE INDEX IF NOT EXISTS idx_attr_name ON correction_attribution(correction_name);
+
+-- QRF predictions (Quant Upgrade 1): p10/p50/p90 per forecast.
+CREATE TABLE IF NOT EXISTS qrf_predictions (
+    forecast_id INTEGER PRIMARY KEY,
+    p10_delta REAL,
+    p50_delta REAL,
+    p90_delta REAL,
+    interval_width REAL,
+    n_training INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (forecast_id) REFERENCES forecasts(id)
+);
+
+-- Regime-shift ledger (Quant Upgrade 3).
+CREATE TABLE IF NOT EXISTS regime_shifts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at TEXT NOT NULL,
+    target_date TEXT NOT NULL,
+    shift_type TEXT NOT NULL,
+    prev_state TEXT,
+    new_state TEXT,
+    weight_reset_applied INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_shift_date ON regime_shifts(target_date);
 """
 
 
@@ -603,6 +627,62 @@ class Storage:
         # Preserve target_date DESC ordering
         out.sort(key=lambda d: d["target_date"], reverse=True)
         return out
+
+    # -- QRF predictions --------------------------------------------------
+    def save_qrf_prediction(self, forecast_id: int,
+                             p10: float, p50: float, p90: float,
+                             interval_width: Optional[float] = None,
+                             n_training: Optional[int] = None) -> None:
+        if interval_width is None:
+            interval_width = p90 - p10
+        with self._conn() as c:
+            c.execute(
+                """INSERT OR REPLACE INTO qrf_predictions
+                   (forecast_id, p10_delta, p50_delta, p90_delta,
+                    interval_width, n_training, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (forecast_id, float(p10), float(p50), float(p90),
+                 float(interval_width),
+                 int(n_training) if n_training is not None else None,
+                 _utc_now_iso()),
+            )
+
+    def get_qrf_prediction(self, forecast_id: int) -> Optional[Dict]:
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT * FROM qrf_predictions WHERE forecast_id=?",
+                (forecast_id,),
+            ).fetchone()
+            return dict(r) if r else None
+
+    # -- Regime shifts ----------------------------------------------------
+    def save_regime_shift(self, row: Dict[str, Any]) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                """INSERT INTO regime_shifts
+                   (detected_at, target_date, shift_type,
+                    prev_state, new_state, weight_reset_applied)
+                   VALUES (?,?,?,?,?,?)""",
+                (
+                    row.get("detected_at") or _utc_now_iso(),
+                    row["target_date"],
+                    row["shift_type"],
+                    row.get("prev_state"),
+                    row.get("new_state"),
+                    int(row.get("weight_reset_applied") or 0),
+                ),
+            )
+            return cur.lastrowid
+
+    def recent_regime_shifts(self, days: int = 7) -> List[Dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM regime_shifts "
+                "WHERE substr(target_date, 1, 10) >= date('now', ?) "
+                "ORDER BY id DESC",
+                (f"-{days} days",),
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def attribution_rows(self, days: int = 30) -> List[Dict]:
         with self._conn() as c:

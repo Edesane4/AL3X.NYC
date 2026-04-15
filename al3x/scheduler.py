@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import traceback
 from datetime import date, datetime, timedelta
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -23,9 +24,26 @@ from . import config as cfg
 from .data_sources import DataSources, high_confirmed
 from .forecaster import Forecaster
 from .learning import Learning
+from .sheets_exporter import SheetsExporter
 from .storage import Storage
 from .telegram_bot import (TelegramNotifier, format_cli_confirmation,
                            format_forecast_for_humans)
+
+
+def _regime_label_from_flags(regime: Dict[str, Any]) -> str:
+    """Same regime-label taxonomy as learning._regime_label, duplicated
+    here to avoid a cross-module import cycle."""
+    if regime.get("precip_heavy"):
+        return "rain_heavy"
+    if regime.get("any_precip_peak"):
+        return "rain_light"
+    if regime.get("sea_breeze_full") or regime.get("sea_breeze_shift"):
+        return "sea_breeze"
+    if regime.get("calm_clear"):
+        return "clear_calm"
+    if regime.get("sustained_windy"):
+        return "windy"
+    return "mixed"
 
 log = logging.getLogger("al3x.scheduler")
 
@@ -52,6 +70,16 @@ class AgentScheduler:
             pass
         self._high_locked_for: set[str] = set()
         self._last_forecast_finalf: Optional[float] = None
+        # Quant Upgrade 3 — regime-shift detection state
+        self._last_regime: Optional[Dict[str, Any]] = None
+        self._last_spread: Optional[float] = None
+        # Google Sheets exporter (optional)
+        spreadsheet_id = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "")
+        creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+        self.sheets: Optional[SheetsExporter] = (
+            SheetsExporter(spreadsheet_id, creds_path)
+            if spreadsheet_id and creds_path else None
+        )
 
     def start(self) -> None:
         # Intraday cycle — every 15 min
@@ -109,6 +137,43 @@ class AgentScheduler:
                 log.error("Job %s failed: %s\n%s", coro_fn.__name__, e, tb)
         return runner
 
+    # ---- Regime-shift detection (Quant Upgrade 3) ----------------------
+    def detect_regime_shift(self, current_regime: Dict[str, Any],
+                             current_spread: Optional[float],
+                             target_date: str) -> List[str]:
+        shift_flags: List[str] = []
+        prev = self._last_regime
+        if prev is not None:
+            if (prev.get("sea_breeze_shift")
+                    != current_regime.get("sea_breeze_shift")):
+                shift_flags.append("sea_breeze")
+            if (not prev.get("any_precip_peak")
+                    and current_regime.get("any_precip_peak")):
+                shift_flags.append("precip_onset")
+            if (prev.get("sustained_windy")
+                    != current_regime.get("sustained_windy")):
+                shift_flags.append("wind")
+            if (self._last_spread is not None and current_spread is not None
+                    and abs(current_spread - self._last_spread) > 3.0):
+                shift_flags.append("spread")
+        return shift_flags
+
+    async def _adaptive_weight_reset(self, shift_flags: List[str]) -> None:
+        """Kick a more aggressive weight retune (blend_alpha=0.50) after
+        a detected regime change so we catch the new regime faster."""
+        try:
+            res = self.learning.retune_weights(blend_alpha=0.50)
+            log.info("Adaptive weight reset (alpha=0.50, shifts=%s): %s",
+                     shift_flags, res)
+        except Exception as e:  # noqa: BLE001
+            log.warning("adaptive weight reset failed: %s", e)
+
+    def _get_night_before_for_date(self, date_str: str) -> Optional[Dict[str, Any]]:
+        for f in self.storage.forecasts_for_date(date_str):
+            if f["mode"] == "night_before":
+                return f
+        return None
+
     # ---- Intraday -------------------------------------------------------
     async def intraday_cycle(self) -> None:
         now = datetime.now(cfg.EASTERN)
@@ -127,9 +192,61 @@ class AgentScheduler:
         fid = self.storage.save_forecast(fc)
         fc["id"] = fid
 
+        # Persist QRF prediction (Quant Upgrade 1)
+        extras = fc.get("extras") or {}
+        qrf = extras.get("qrf")
+        if qrf is not None:
+            try:
+                self.storage.save_qrf_prediction(
+                    fid,
+                    p10=qrf.get("p10_delta", 0.0),
+                    p50=qrf.get("p50_delta", 0.0),
+                    p90=qrf.get("p90_delta", 0.0),
+                    interval_width=qrf.get("interval_width"),
+                    n_training=qrf.get("n_training"),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.info("qrf persistence failed: %s", e)
+
         log.info("Intraday forecast %s: %.1f°F (raw %.2f, Δ %s, asos_max %s)",
                  fc["target_date"], fc["final_f"], fc["raw_ensemble_f"],
                  fc.get("delta_prior_f"), fc.get("running_asos_max_f"))
+
+        # Regime-shift detection (Quant Upgrade 3) — compare current
+        # regime/spread to the last cycle's. Fires only when we have a
+        # prior regime to compare against.
+        current_regime = extras.get("regime") or {}
+        current_spread = extras.get("spread_f")
+        shift_flags = self.detect_regime_shift(
+            current_regime, current_spread, today_str,
+        )
+        if shift_flags:
+            for stype in shift_flags:
+                key_map = {
+                    "precip_onset": "any_precip_peak",
+                    "sea_breeze": "sea_breeze_shift",
+                    "wind": "sustained_windy",
+                }
+                check_key = key_map.get(stype, stype)
+                self.storage.save_regime_shift({
+                    "detected_at": datetime.now(cfg.EASTERN).isoformat(),
+                    "target_date": today_str,
+                    "shift_type": stype,
+                    "prev_state": str((self._last_regime or {}).get(check_key, "")),
+                    "new_state": str(current_regime.get(check_key, "")),
+                    "weight_reset_applied": 1,
+                })
+            await self._adaptive_weight_reset(shift_flags)
+            log.info("Regime shift detected on %s: %s — adaptive weight "
+                     "reset fired", today_str, shift_flags)
+            if self.notifier.configured:
+                self.notifier.enqueue(
+                    f"⚡ <b>Regime shift detected</b>: "
+                    f"{', '.join(shift_flags)}\n"
+                    f"Adaptive weight reset applied for {today_str}"
+                )
+        self._last_regime = current_regime
+        self._last_spread = current_spread
 
         # Notify only when it's meaningfully different
         delta = fc.get("delta_prior_f")
@@ -193,10 +310,30 @@ class AgentScheduler:
         fid = self.storage.save_forecast(fc)
         fc["id"] = fid
         self._night_before_runs[key] = run_number
+        # Persist QRF prediction for night-before too
+        nb_qrf = (fc.get("extras") or {}).get("qrf")
+        if nb_qrf is not None:
+            try:
+                self.storage.save_qrf_prediction(
+                    fid,
+                    p10=nb_qrf.get("p10_delta", 0.0),
+                    p50=nb_qrf.get("p50_delta", 0.0),
+                    p90=nb_qrf.get("p90_delta", 0.0),
+                    interval_width=nb_qrf.get("interval_width"),
+                    n_training=nb_qrf.get("n_training"),
+                )
+            except Exception as e:  # noqa: BLE001
+                log.info("qrf persistence failed: %s", e)
         log.info("Night-before forecast (run %d/3) %s: %.1f°F",
                  run_number, fc["target_date"], fc["final_f"])
         if self.notifier.configured:
             self.notifier.enqueue(format_forecast_for_humans(fc))
+        # Sheets: append a forecast-log row
+        if self.sheets and self.sheets.enabled:
+            try:
+                await asyncio.to_thread(self.sheets.push_forecast_log, fc)
+            except Exception as e:  # noqa: BLE001
+                log.warning("Sheets forecast log push failed: %s", e)
 
     # ---- CLI verification ----------------------------------------------
     async def cli_verification_cycle(self) -> None:
@@ -227,6 +364,52 @@ class AgentScheduler:
                 format_cli_confirmation(today_str, cli["recorded_high_f"],
                                          best_f, err)
             )
+
+        # Sheets: append a daily-result row with all the relevant fields
+        if self.sheets and self.sheets.enabled:
+            try:
+                night_fc = self._get_night_before_for_date(today_str)
+                extras = (latest.get("extras") or {}) if latest else {}
+                regime = extras.get("regime") or {}
+                sources = (latest.get("sources") or {}) if latest else {}
+                qrf = extras.get("qrf") or {}
+                analog = extras.get("analog") or {}
+                ai_cal = extras.get("ai_calibration") or {}
+                bma = extras.get("bma")
+                data = {
+                    "night_before_f": (night_fc.get("final_f")
+                                        if night_fc else ""),
+                    "final_intraday_f": (latest.get("final_f")
+                                          if latest else ""),
+                    "cli_f": cli["recorded_high_f"],
+                    "nb_error": (round(cli["recorded_high_f"]
+                                        - night_fc["final_f"], 2)
+                                 if night_fc else ""),
+                    "final_error": round(err, 2),
+                    "regime": _regime_label_from_flags(regime),
+                    "sea_breeze": bool(regime.get("sea_breeze_shift")
+                                       or regime.get("sea_breeze_full")),
+                    "precip": bool(regime.get("any_precip_peak")
+                                   or regime.get("precip_heavy")),
+                    "hrrr_f": (sources.get("hrrr") or {}).get("value", ""),
+                    "ecmwf_f": (sources.get("ecmwf") or {}).get("value", ""),
+                    "gfs_mos_f": (sources.get("gfs_mos") or {}).get(
+                        "value", ""),
+                    "bma_f": (bma.get("bma_forecast_f") if bma else ""),
+                    "analog_bias": analog.get("analog_bias_f", ""),
+                    "ai_delta": ai_cal.get("delta_f", ""),
+                    "qrf_p10": qrf.get("p10_delta", ""),
+                    "qrf_p90": qrf.get("p90_delta", ""),
+                    "uncertainty": (latest.get("uncertainty_f")
+                                     if latest else ""),
+                    "spread": extras.get("spread_f", ""),
+                }
+                await asyncio.to_thread(
+                    self.sheets.push_daily_result, today_str, data,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Sheets daily push failed: %s", e)
+
         # Trigger night-before for tomorrow now that truth is in (run #3
         # gate is "CLI verified", which is now true).
         await self.night_before_cycle()
@@ -241,6 +424,16 @@ class AgentScheduler:
                 f"Source MAE: <code>{res['mae']}</code>\n"
                 f"Changes: <code>{res['changes']}</code>"
             )
+        # Sheets: weekly performance snapshot
+        if self.sheets and self.sheets.enabled:
+            try:
+                attribution = self.learning.attribution_stats(days=30)
+                stats = self.learning.headline_stats()
+                await asyncio.to_thread(
+                    self.sheets.push_performance_summary, stats, attribution,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Sheets performance push failed: %s", e)
 
     async def retune_biases(self) -> None:
         res = self.learning.retune_biases()

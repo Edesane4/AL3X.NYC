@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import config as cfg
 from .climatology import RateClimatology
 from .data_sources import DataSources, SourceResult, running_max
+from .quantile_forest import QuantileForest, _feature_vector as _qrf_fv
 
 log = logging.getLogger("al3x.forecaster")
 
@@ -62,6 +63,27 @@ def _weighted_mean(source_values: Dict[str, float],
         out[k] = SourceView(k, source_values[k], w_norm)
         wsum += source_values[k] * w_norm
     return wsum, out
+
+
+def _build_qrf_feature_vector(source_values: Dict[str, float],
+                               spread: Optional[float],
+                               lead_hours: float,
+                               regime: Dict[str, Any],
+                               target_date: date) -> List[float]:
+    """10-element normalized feature vector matching QRF training layout."""
+    return _qrf_fv(
+        hrrr_f=source_values.get("hrrr"),
+        ecmwf_f=source_values.get("ecmwf"),
+        gfs_mos_f=source_values.get("gfs_mos"),
+        spread=spread,
+        lead_hours=lead_hours,
+        month=target_date.month,
+        sea_breeze=bool(regime.get("sea_breeze_shift")
+                        or regime.get("sea_breeze_full")),
+        precip=bool(regime.get("any_precip_peak")
+                    or regime.get("precip_heavy")),
+        cloud_avg=regime.get("cloud_avg"),
+    )
 
 
 def _asos_trend_projection(obs_today: List[Dict[str, Any]],
@@ -449,6 +471,10 @@ class Forecaster:
         # PERF 1 — cache BMA results by (target_date, mode) for 60 minutes
         self._bma_cache: Dict[str, Any] = {}
         self._bma_cache_ttl: int = 3600
+        # Quant Upgrade 1 — Quantile Regression Forest, rebuilt at most
+        # once per calendar day.
+        self._qrf: QuantileForest = QuantileForest()
+        self._qrf_trained_date: Optional[date] = None
 
     def _live_bias(self) -> BiasLive:
         values = self.storage.get_biases()
@@ -724,12 +750,35 @@ class Forecaster:
             except Exception as e:  # noqa: BLE001
                 log.warning("AI calibration failed, continuing without: %s", e)
 
+        # Quant Upgrade 1 — Quantile Regression Forest calibrates a p10/
+        # p50/p90 prediction interval around the current forecast state.
+        # Applied after bias corrections, analog matching, and AI
+        # calibration; before the running-max floor.
+        qrf_result = None
+        try:
+            today_d = datetime.now(cfg.EASTERN).date()
+            if self._qrf_trained_date != today_d:
+                trained = self._qrf.train(self.storage)
+                if trained:
+                    self._qrf_trained_date = today_d
+            qrf_fv = _build_qrf_feature_vector(
+                source_values, spread, lead_hours, regime, target_date,
+            )
+            qrf_result = self._qrf.predict(qrf_fv)
+        except Exception as e:  # noqa: BLE001
+            log.info("QRF train/predict failed: %s", e)
+
         # Running-max floor for intraday
         if mode == "intraday" and running_max_f is not None:
             final = max(final, running_max_f)
 
-        # Uncertainty — prefer BMA's calibrated sigma when available.
-        if bma_result is not None:
+        # Uncertainty — QRF interval width is the best-calibrated sigma
+        # when available; BMA sigma is second choice; heuristic is last.
+        if qrf_result is not None:
+            # Half of the 80% prediction interval ≈ 1-sigma for a
+            # roughly-symmetric residual distribution.
+            uncertainty = max(0.5, qrf_result["interval_width"] / 2.0)
+        elif bma_result is not None:
             uncertainty = float(bma_result["bma_variance_f"])
         else:
             uncertainty = 2.0
@@ -780,6 +829,7 @@ class Forecaster:
             "ai_calibration": ai_result,
             "bma": bma_result,
             "analog": analog_result,
+            "qrf": qrf_result,
             # BUG 7 — persist live surface fields so the analog library
             # rebuild can use actual dewpoint/wind instead of the
             # hardcoded seasonal fallback.
