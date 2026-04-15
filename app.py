@@ -210,6 +210,50 @@ async def kalshi_state():
     })
 
 
+@app.post("/api/kalshi/backtest")
+async def run_backtest(days: int = 30):
+    """Run the historical backtest over the past `days` days.
+
+    Returns the full summary dict including win rate, total P&L,
+    ROI, per-strategy breakdown, and a go/no-go recommendation.
+
+    This endpoint may take 30-120 seconds to complete depending on
+    how many days are requested and Kalshi API response times.
+    """
+    try:
+        from al3x.kalshi_backtest import KalshiBacktest
+        storage: Storage = app.state.storage
+        feed = app.state.agent._kalshi_feed
+        backtest = KalshiBacktest(storage, feed)
+        result = await backtest.run(
+            days_back=min(days, 90),
+            starting_bankroll=cfg.KALSHI_STARTING_BANKROLL,
+        )
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse(
+            {"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.get("/api/kalshi/backtest/history")
+async def backtest_history():
+    """Return all stored backtest results from the DB."""
+    storage: Storage = app.state.storage
+    try:
+        with storage._conn() as c:  # noqa: SLF001
+            rows = c.execute(
+                "SELECT run_at, target_date, strategy, simulated_side, "
+                "simulated_entry_price, simulated_contracts, "
+                "simulated_cost_basis, simulated_pnl, edge_cents, ev, "
+                "settlement_result, cli_high_f, al3x_fair_value "
+                "FROM kalshi_backtest_results "
+                "ORDER BY run_at DESC, target_date DESC LIMIT 500"
+            ).fetchall()
+        return JSONResponse({"results": [dict(r) for r in rows]})
+    except Exception as e:
+        return JSONResponse({"results": [], "error": str(e)})
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
