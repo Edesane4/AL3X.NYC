@@ -43,6 +43,13 @@ class AgentScheduler:
         # BUG 6 — up to 3 night-before runs per evening, tracked by date.
         self._night_before_runs: Dict[str, int] = {}
         self._cli_verified_for: set[str] = set()
+        # BUGS 1+3 — survive restarts without re-scoring already-verified
+        # days. Seed the in-memory guard from the DB at boot.
+        try:
+            for r in storage.get_cli_truth_recent(days=2):
+                self._cli_verified_for.add(r["target_date"])
+        except Exception:
+            pass
         self._high_locked_for: set[str] = set()
         self._last_forecast_finalf: Optional[float] = None
 

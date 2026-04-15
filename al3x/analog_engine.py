@@ -76,10 +76,12 @@ def _feature_vector_for_historical(fc: Dict[str, Any]) -> Optional[List[float]]:
 
     lead = float(extras.get("lead_hours") or 12.0)
 
-    # Observations field isn't persisted per forecast, so we approximate
-    # surface dewpoint via regime flags (inversion → close to temp)
-    # and wind_speed via regime.max_wind_kt.
-    wind = regime.get("max_wind_kt")
+    # BUG 7 — prefer the live dewpoint/wind persisted in extras. Fall
+    # back to the seasonal approximation only for legacy forecast rows
+    # that predate the fix.
+    dewpoint = extras.get("surface_dewpoint_f")
+    wind = (extras.get("surface_wind_speed_kt")
+            or regime.get("max_wind_kt"))
     sky = regime.get("cloud_avg")
 
     # Precip prob: approximate from regime flags
@@ -90,14 +92,14 @@ def _feature_vector_for_historical(fc: Dict[str, Any]) -> Optional[List[float]]:
     else:
         precip = 10.0
 
-    # Dewpoint: we don't have it directly; use a seasonal baseline
-    #  Summer ~65, Winter ~25, Spring/Fall ~45
-    if 6 <= ts_month <= 8:
-        dewpoint = 65.0
-    elif 12 <= ts_month or ts_month <= 2:
-        dewpoint = 25.0
-    else:
-        dewpoint = 45.0
+    if dewpoint is None:
+        # Seasonal fallback: summer ~65, winter ~25, spring/fall ~45
+        if 6 <= ts_month <= 8:
+            dewpoint = 65.0
+        elif 12 <= ts_month or ts_month <= 2:
+            dewpoint = 25.0
+        else:
+            dewpoint = 45.0
 
     return build_feature_vector(
         hrrr_forecast_f=hrrr_f,
@@ -119,7 +121,12 @@ def find_analogs(feature_vector: List[float], storage, K: int = 7,
     with at least: target_date, final_f, sources, extras, cli_f.
     """
     try:
-        rows = storage.forecasts_with_truth(days=365)
+        # BUG 5 — train the analog library on night_before forecasts,
+        # NOT on the last intraday which gets pinned to running_max
+        # minutes before CLI posts.
+        rows = storage.forecasts_with_truth(
+            days=365, prefer_mode="night_before",
+        )
     except Exception as e:  # noqa: BLE001
         log.info("analog: forecasts_with_truth failed: %s", e)
         return None

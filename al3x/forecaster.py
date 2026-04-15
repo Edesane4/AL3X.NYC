@@ -12,6 +12,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config as cfg
+from .climatology import RateClimatology
 from .data_sources import DataSources, SourceResult, running_max
 
 log = logging.getLogger("al3x.forecaster")
@@ -441,6 +442,13 @@ class Forecaster:
         self.storage = storage
         self.sources = sources
         self.ai_calibrator = ai_calibrator
+        # BUG 2 — keep the climatology across produce() calls and rebuild
+        # at most once per calendar day.
+        self._clim: RateClimatology = RateClimatology()
+        self._clim_built_date: Optional[date] = None
+        # PERF 1 — cache BMA results by (target_date, mode) for 60 minutes
+        self._bma_cache: Dict[str, Any] = {}
+        self._bma_cache_ttl: int = 3600
 
     def _live_bias(self) -> BiasLive:
         values = self.storage.get_biases()
@@ -475,10 +483,18 @@ class Forecaster:
             0.0,
         )
 
-        # Fetch everything concurrently
+        # PERF 2 — create ALL non-model tasks in parallel before awaiting.
+        # Only ASOS must complete before the diurnal-fit-aware HRRR/ECMWF
+        # calls, because their curve-fit weights observations 3×.
         import asyncio
-        asos_task = asyncio.create_task(self.sources.asos_observations())
-        obs = await asos_task  # need these first to weight the diurnal fit
+        asos_task    = asyncio.create_task(self.sources.asos_observations())
+        hourly_task  = asyncio.create_task(self.sources.nws_hourly_max(target_date))
+        nbm_task     = asyncio.create_task(self.sources.nws_daily_max(target_date))
+        grid_task    = asyncio.create_task(self.sources.nws_grid_data(target_date))
+        gfs_task     = asyncio.create_task(self.sources.gfs_mos(target_date))
+
+        # Await ASOS first so we can pass obs to the diurnal fitter
+        obs = await asos_task
 
         today_str = target_date.isoformat() if mode == "intraday" else None
         if mode == "intraday" and obs:
@@ -491,23 +507,17 @@ class Forecaster:
         obs_today = (self.storage.observations_today(today_str)
                      if today_str else [])
 
-        hourly_task = asyncio.create_task(self.sources.nws_hourly_max(target_date))
-        nbm_task = asyncio.create_task(self.sources.nws_daily_max(target_date))
-        grid_task = asyncio.create_task(self.sources.nws_grid_data(target_date))
-        # BUG 5 — pass lead_hours so HRRR picks ncep_hrrr vs gfs_seamless
+        # Kick off model tasks that depend on obs_today
         hrrr_task = asyncio.create_task(
             self.sources.hrrr(target_date, lead_hours=lead_hours,
                               also_obs=obs_today))
         ecmwf_task = asyncio.create_task(
             self.sources.ecmwf(target_date, also_obs=obs_today))
-        gfs_task = asyncio.create_task(self.sources.gfs_mos(target_date))
 
-        nws_r = await hourly_task
-        nbm_r = await nbm_task
-        grid_r = await grid_task
-        hrrr_r = await hrrr_task
-        ecmwf_r = await ecmwf_task
-        gfs_r = await gfs_task
+        # Await all remaining tasks concurrently
+        nws_r, nbm_r, grid_r, hrrr_r, ecmwf_r, gfs_r = await asyncio.gather(
+            hourly_task, nbm_task, grid_task, hrrr_task, ecmwf_task, gfs_task,
+        )
 
         running_max_f, _ = running_max(obs_today)
 
@@ -533,18 +543,19 @@ class Forecaster:
         if mode == "intraday" and len(obs_today) >= 3:
             try:
                 from .kalman_tracker import project_daily_max
-                from .climatology import RateClimatology
-                clim = RateClimatology()
-                try:
-                    clim.build(self.storage)
-                except Exception as e:  # noqa: BLE001
-                    log.info("climatology build error: %s", e)
-                # Provisional regime-free sky/wind averages from obs_today
+                # BUG 2 — rebuild climatology at most once per calendar day
+                today_d = datetime.now(cfg.EASTERN).date()
+                if self._clim_built_date != today_d:
+                    try:
+                        self._clim.build(self.storage)
+                        self._clim_built_date = today_d
+                    except Exception as e:  # noqa: BLE001
+                        log.info("climatology build error: %s", e)
                 _sky_vals = [o.get("sky_cover_pct") for o in obs_today
                              if o.get("sky_cover_pct") is not None]
                 _wind_vals = [o.get("wind_speed_kt") for o in obs_today
                               if o.get("wind_speed_kt") is not None]
-                prior_rate = clim.get_prior_rate(
+                prior_rate = self._clim.get_prior_rate(
                     target_date.month,
                     (sum(_sky_vals) / len(_sky_vals)) if _sky_vals else None,
                     (sum(_wind_vals) / len(_wind_vals)) if _wind_vals else None,
@@ -602,14 +613,27 @@ class Forecaster:
         # Quant 1 — Bayesian Model Averaging. If we have enough history,
         # replace the plain weighted mean with the bias-corrected BMA
         # forecast and use its predictive variance to size uncertainty.
+        # PERF 1 — cache results by (target_date, mode) for 60 minutes so
+        # intraday cycles don't re-run 5+ DB aggregations every 15 min.
+        import time as _time
+        bma_cache_key = f"{target_date.isoformat()}:{mode}"
+        bma_cached = self._bma_cache.get(bma_cache_key)
         bma_result = None
-        try:
-            from .bma import compute_bma
-            bma_result = compute_bma(
-                source_values, weights, self.storage, target_date, mode,
-            )
-        except Exception as e:  # noqa: BLE001
-            log.info("BMA unavailable: %s", e)
+        if bma_cached and (_time.time() - bma_cached[0]) < self._bma_cache_ttl:
+            bma_result = bma_cached[1]
+        else:
+            try:
+                from .bma import compute_bma
+                bma_result = compute_bma(
+                    source_values, weights, self.storage, target_date, mode,
+                )
+                self._bma_cache[bma_cache_key] = (_time.time(), bma_result)
+            except Exception as e:  # noqa: BLE001
+                log.info("BMA unavailable: %s", e)
+        # Evict cache entries older than 2 hours to bound memory
+        now_ts = _time.time()
+        self._bma_cache = {k: v for k, v in self._bma_cache.items()
+                           if now_ts - v[0] < 7200}
         if bma_result is not None:
             raw_ensemble = float(bma_result["bma_forecast_f"])
 
@@ -627,21 +651,25 @@ class Forecaster:
 
         final = raw_ensemble + total_delta
 
+        # BUG 7 — extract the latest live dewpoint + wind from ASOS and
+        # persist them in extras. This gives future analog-library
+        # rebuilds access to the *actual* surface humidity/wind at the
+        # time of forecast, rather than a hardcoded seasonal fallback.
+        live_dewpoint_f: Optional[float] = None
+        live_wind_speed_kt: Optional[float] = None
+        for o in reversed(obs_today or []):
+            if live_dewpoint_f is None and o.get("dewpoint_f") is not None:
+                live_dewpoint_f = float(o["dewpoint_f"])
+            if live_wind_speed_kt is None and o.get("wind_speed_kt") is not None:
+                live_wind_speed_kt = float(o["wind_speed_kt"])
+            if live_dewpoint_f is not None and live_wind_speed_kt is not None:
+                break
+
         # Quant 3 — analog pattern matching applied after bias corrections
         # but BEFORE AI calibration (per directive pipeline order).
         analog_result = None
         try:
             from .analog_engine import build_feature_vector, find_analogs
-            # Pull regime-extracted proxies for the feature vector
-            dewpoint = None
-            wind_speed = None
-            for o in reversed(obs_today or []):
-                if dewpoint is None and o.get("dewpoint_f") is not None:
-                    dewpoint = o["dewpoint_f"]
-                if wind_speed is None and o.get("wind_speed_kt") is not None:
-                    wind_speed = o["wind_speed_kt"]
-                if dewpoint is not None and wind_speed is not None:
-                    break
             precip_prob = None
             grid_rows = (grid_r.meta.get("hourly_grid")
                          if grid_r and grid_r.meta else None)
@@ -652,8 +680,8 @@ class Forecaster:
                     precip_prob = max(peaks)
             fv = build_feature_vector(
                 hrrr_forecast_f=hrrr_r.value if hrrr_r else None,
-                dewpoint_f=dewpoint,
-                wind_speed_kt=wind_speed,
+                dewpoint_f=live_dewpoint_f,
+                wind_speed_kt=live_wind_speed_kt,
                 precip_prob_pct=precip_prob,
                 sky_cover_pct=regime.get("cloud_avg"),
                 month=target_date.month,
@@ -752,6 +780,11 @@ class Forecaster:
             "ai_calibration": ai_result,
             "bma": bma_result,
             "analog": analog_result,
+            # BUG 7 — persist live surface fields so the analog library
+            # rebuild can use actual dewpoint/wind instead of the
+            # hardcoded seasonal fallback.
+            "surface_dewpoint_f": live_dewpoint_f,
+            "surface_wind_speed_kt": live_wind_speed_kt,
         }
 
         return {

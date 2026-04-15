@@ -71,9 +71,11 @@ CREATE TABLE IF NOT EXISTS scores (
     abs_error_f REAL NOT NULL,
     lead_hours REAL NOT NULL,
     regime TEXT,
+    UNIQUE(forecast_id, mode),
     FOREIGN KEY (forecast_id) REFERENCES forecasts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_scores_target ON scores(target_date);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_scores_fc_mode ON scores(forecast_id, mode);
 
 CREATE TABLE IF NOT EXISTS bias_state (
     key TEXT PRIMARY KEY,
@@ -222,6 +224,31 @@ class Storage:
             except sqlite3.OperationalError:
                 pass
 
+            # BUGS 1+3 — dedupe scores + enforce UNIQUE(forecast_id, mode)
+            # so restarts can't re-score an already-scored forecast.
+            try:
+                c.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ux_scores_fc_mode "
+                    "ON scores(forecast_id, mode)"
+                )
+            except sqlite3.IntegrityError:
+                log.warning("scores has duplicate (forecast_id, mode) rows; "
+                            "deduplicating before enforcing UNIQUE index")
+                c.execute(
+                    "DELETE FROM scores WHERE id NOT IN ("
+                    " SELECT MIN(id) FROM scores GROUP BY forecast_id, mode"
+                    ")"
+                )
+                try:
+                    c.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS ux_scores_fc_mode "
+                        "ON scores(forecast_id, mode)"
+                    )
+                except sqlite3.IntegrityError:
+                    pass
+            except sqlite3.OperationalError:
+                pass
+
     # -- forecasts ---------------------------------------------------------
     def save_forecast(self, row: Dict[str, Any]) -> int:
         with self._conn() as c:
@@ -337,11 +364,26 @@ class Storage:
             ).fetchone()
             return dict(r) if r else None
 
+    def get_cli_truth_recent(self, days: int = 2) -> List[Dict]:
+        """Return CLI truth rows from the last ``days`` days. Used at
+        boot to pre-populate the scheduler's in-memory
+        ``_cli_verified_for`` set so that restarts don't re-score."""
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT target_date FROM cli_truth "
+                "WHERE target_date >= date('now', ?)",
+                (f"-{days} days",),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     # -- scores ------------------------------------------------------------
     def save_score(self, row: Dict[str, Any]) -> None:
+        """BUGS 1+3 — INSERT OR IGNORE skips re-scoring on double-verify
+        (e.g. restarts that lose the in-memory _cli_verified_for guard).
+        """
         with self._conn() as c:
             c.execute(
-                """INSERT INTO scores
+                """INSERT OR IGNORE INTO scores
                    (target_date, forecast_id, mode, error_f, abs_error_f,
                     lead_hours, regime)
                    VALUES (?,?,?,?,?,?,?)""",
@@ -357,9 +399,13 @@ class Storage:
             )
 
     def recent_scores(self, days: int = 30) -> List[Dict]:
+        # BUG 4 — target_date is always a bare YYYY-MM-DD string, so
+        # comparing against date('now', ...) is already correct here;
+        # leave as-is but ensure consistency with the other methods.
         with self._conn() as c:
             rows = c.execute(
-                "SELECT * FROM scores WHERE target_date >= date('now', ?) "
+                "SELECT * FROM scores "
+                "WHERE substr(target_date, 1, 10) >= date('now', ?) "
                 "ORDER BY target_date DESC",
                 (f"-{days} days",),
             ).fetchall()
@@ -483,25 +529,46 @@ class Storage:
                 "predicted_f": float(v),
                 "cli_f": float(row["cli_f"]),
             })
-        return rows
+        # BUG 6 — one row per target_date for honest bias/variance.
+        # Prefer the intraday row if both modes exist for a date.
+        seen: Dict[str, Dict] = {}
+        for row in rows:
+            d = row["target_date"]
+            if d not in seen or row["mode"] == "intraday":
+                seen[d] = row
+        return list(seen.values())
 
     def observations_all_days(self, limit_days: int = 365) -> List[Dict]:
         """Return every observation from the last N days (no date filter
-        beyond the cutoff). Used by RateClimatology."""
+        beyond the cutoff). Used by RateClimatology.
+
+        BUG 4 — compare the first 10 chars (YYYY-MM-DD) of observed_at
+        against date('now', ...). The stored string is a tz-aware ISO
+        timestamp like 2026-04-14T14:30:00-04:00, which SQLite's
+        datetime() can't compare correctly against its UTC clock.
+        """
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM observations "
-                "WHERE observed_at >= datetime('now', ?) "
+                "WHERE substr(observed_at, 1, 10) >= date('now', ?) "
                 "ORDER BY observed_at ASC",
                 (f"-{limit_days} days",),
             ).fetchall()
             return [dict(r) for r in rows]
 
-    def forecasts_with_truth(self, days: int = 365) -> List[Dict]:
+    def forecasts_with_truth(self, days: int = 365,
+                              prefer_mode: str = "night_before") -> List[Dict]:
         """Return forecast rows joined with their CLI truth, for the
-        analog engine. Most recent one forecast per day is returned
-        (prefers intraday over night_before when both exist)."""
-        out: List[Dict] = []
+        analog engine.
+
+        BUG 5 — for each target_date, prefer the row whose mode matches
+        ``prefer_mode`` (default 'night_before'). This avoids training the
+        analog library on end-of-day "locked" intraday forecasts (issued
+        minutes before CLI posts when running_max has already pinned the
+        forecast close to truth), which understated real forecast errors.
+        If no matching-mode row exists for a date, fall back to the
+        latest row for that date.
+        """
         with self._conn() as c:
             rows = c.execute(
                 "SELECT f.*, t.recorded_high_f AS cli_f "
@@ -511,10 +578,11 @@ class Storage:
                 "ORDER BY f.target_date DESC, f.id DESC",
                 (f"-{days} days",),
             ).fetchall()
-        seen_dates: set = set()
+
+        # Group all rows per target_date
+        by_date: Dict[str, List[Dict]] = {}
         for r in rows:
             d = dict(r)
-            # Parse JSON columns like _forecast_row
             for k in ("sources_json", "corrections_json", "extras_json"):
                 if d.get(k):
                     try:
@@ -522,19 +590,25 @@ class Storage:
                     except Exception:
                         d[k.replace("_json", "")] = {}
                     d.pop(k, None)
-            # First row per date wins (ordered DESC by id so we take the
-            # latest intraday or night-before).
-            if d["target_date"] in seen_dates:
-                continue
-            seen_dates.add(d["target_date"])
-            out.append(d)
+            by_date.setdefault(d["target_date"], []).append(d)
+
+        out: List[Dict] = []
+        for date_key, candidates in by_date.items():
+            # Candidates are already ordered id DESC (newest first)
+            preferred = next(
+                (c for c in candidates if c.get("mode") == prefer_mode),
+                None,
+            )
+            out.append(preferred if preferred is not None else candidates[0])
+        # Preserve target_date DESC ordering
+        out.sort(key=lambda d: d["target_date"], reverse=True)
         return out
 
     def attribution_rows(self, days: int = 30) -> List[Dict]:
         with self._conn() as c:
             rows = c.execute(
                 "SELECT * FROM correction_attribution "
-                "WHERE target_date >= date('now', ?) "
+                "WHERE substr(target_date, 1, 10) >= date('now', ?) "
                 "ORDER BY target_date DESC",
                 (f"-{days} days",),
             ).fetchall()
