@@ -71,7 +71,6 @@ CREATE TABLE IF NOT EXISTS scores (
     abs_error_f REAL NOT NULL,
     lead_hours REAL NOT NULL,
     regime TEXT,
-    UNIQUE(forecast_id, mode),
     FOREIGN KEY (forecast_id) REFERENCES forecasts(id)
 );
 CREATE INDEX IF NOT EXISTS idx_scores_target ON scores(target_date);

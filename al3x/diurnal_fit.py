@@ -68,7 +68,11 @@ def spline_peak(hourly_today: Sequence[Tuple[float, float]],
             continue
         if dt.date() != target_date:
             continue
-        h = dt.hour + dt.minute / 60.0
+        # Round to the nearest 0.5-hour boundary so obs land on distinct
+        # knots from the integer-hour HRRR output; otherwise the per-hour
+        # averaging dilutes the 3x obs weight to 75%.
+        h_raw = dt.hour + dt.minute / 60.0
+        h = round(h_raw * 2) / 2.0
         if 7.0 <= h <= 20.0:
             obs_points.append((h, float(temp)))
 

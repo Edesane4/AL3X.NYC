@@ -765,6 +765,11 @@ class Forecaster:
                 source_values, spread, lead_hours, regime, target_date,
             )
             qrf_result = self._qrf.predict(qrf_fv)
+            if qrf_result is not None:
+                p50 = float(qrf_result.get("p50_delta") or 0.0)
+                if abs(p50) > 1e-6:
+                    final = final + p50
+                    log.debug("QRF p50 correction applied: %+.2f°F", p50)
         except Exception as e:  # noqa: BLE001
             log.info("QRF train/predict failed: %s", e)
 

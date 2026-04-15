@@ -73,6 +73,16 @@ class AgentScheduler:
         # Quant Upgrade 3 — regime-shift detection state
         self._last_regime: Optional[Dict[str, Any]] = None
         self._last_spread: Optional[float] = None
+        # Seed regime-shift state from last stored forecast so the first
+        # post-restart cycle has a prior to compare against.
+        try:
+            last_fc = storage.latest_forecast()
+            if last_fc and last_fc.get("mode") == "intraday":
+                seed_extras = last_fc.get("extras") or {}
+                self._last_regime = seed_extras.get("regime") or None
+                self._last_spread = seed_extras.get("spread_f")
+        except Exception:
+            pass
         # Google Sheets exporter (optional)
         spreadsheet_id = os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID", "")
         creds_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
@@ -96,12 +106,13 @@ class AgentScheduler:
             CronTrigger(hour="18-23", minute="0,30", timezone=str(cfg.EASTERN)),
             id="night_before",
         )
-        # CLI posts the morning AFTER the day it covers, not the same
-        # evening. Poll every 15 min from midnight to noon Eastern to
-        # catch the previous day's CLI as soon as NWS OKX issues it.
+        # NWS OKX posts NYC CLI the same evening it covers (~5:30–7:30 PM
+        # Eastern). Poll every 10 min across the 17:00-21:59 window to
+        # catch late postings. Already-verified dates are skipped via
+        # _cli_verified_for so extra polls are cheap.
         self.scheduler.add_job(
             self._safe(self.cli_verification_cycle),
-            CronTrigger(hour="0-11", minute="0,15,30,45",
+            CronTrigger(hour="17-21", minute="0,10,20,30,40,50",
                         timezone=str(cfg.EASTERN)),
             id="cli_verify",
         )
@@ -290,12 +301,12 @@ class AgentScheduler:
         if not forced:
             if runs_done >= 3:
                 return
-            # NWS CLI posts the morning AFTER the day it covers, so "fresh
-            # truth" by the evening of day D means YESTERDAY's CLI is in
-            # the verified set. That is the learning-ready signal for
-            # night-before run #3.
-            yesterday_key = (now - timedelta(days=1)).date().isoformat()
-            cli_ready = yesterday_key in self._cli_verified_for
+            # NWS OKX posts today's CLI same evening (~6:30 PM Eastern),
+            # so by the time run #3 fires, today's CLI should already be
+            # in the verified set — that's the "fresh truth available"
+            # signal for aggressive night-before tuning.
+            today_key = now.date().isoformat()
+            cli_ready = today_key in self._cli_verified_for
             # Gate runs by time-of-day / CLI readiness
             if runs_done == 0:
                 if now.hour < 18:
@@ -341,20 +352,20 @@ class AgentScheduler:
 
     # ---- CLI verification ----------------------------------------------
     async def cli_verification_cycle(self) -> None:
-        """NWS CLI posts the morning AFTER the day it covers. When we
-        poll, we trust the CLI's own valid date (typically yesterday
-        local) rather than assuming it describes "today".
+        """NWS OKX posts NYC CLI the same evening it covers
+        (~5:30-7:30 PM Eastern). The CLI's own parsed valid date is
+        always authoritative.
         """
         now = datetime.now(cfg.EASTERN)
+        today_str = now.date().isoformat()
+
         cli = await self.sources.cli_latest()
         if not cli:
             return
 
-        # Use the date the CLI itself reports. If it can't be parsed out,
-        # fall back to yesterday local Eastern (the normal coverage day).
-        target_date = cli.get("target_date")
-        if not target_date:
-            target_date = (now - timedelta(days=1)).date().isoformat()
+        # The CLI's own parsed valid date is always authoritative. Fall
+        # back to today only if parsing failed (not yesterday).
+        target_date = cli.get("target_date") or today_str
 
         if target_date in self._cli_verified_for:
             return
