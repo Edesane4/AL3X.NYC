@@ -28,6 +28,8 @@ from .sheets_exporter import SheetsExporter
 from .storage import Storage
 from .telegram_bot import (TelegramNotifier, format_cli_confirmation,
                            format_forecast_for_humans)
+from .kalshi_engine import KalshiEngine
+from .kalshi_feed import KalshiFeed
 
 
 def _regime_label_from_flags(regime: Dict[str, Any]) -> str:
@@ -91,6 +93,10 @@ class AgentScheduler:
             if spreadsheet_id and creds_path else None
         )
 
+        # Kalshi market intelligence engine
+        self._kalshi_feed = KalshiFeed()
+        self._kalshi_engine = KalshiEngine(storage, self._kalshi_feed)
+
     def start(self) -> None:
         # Intraday cycle — every 15 min
         self.scheduler.add_job(
@@ -130,12 +136,23 @@ class AgentScheduler:
                         timezone=str(cfg.EASTERN)),
             id="retune_biases",
         )
+        # Kalshi orderbook scan — every 30 seconds
+        self.scheduler.add_job(
+            self._safe(self.kalshi_scan_cycle),
+            IntervalTrigger(seconds=cfg.KALSHI_FEED_INTERVAL_SECONDS, jitter=5),
+            id="kalshi_scan",
+            next_run_time=datetime.now(cfg.EASTERN) + timedelta(seconds=15),
+        )
         self.scheduler.start()
         log.info("AL3X.NYC scheduler started (all jobs armed).")
 
     async def stop(self) -> None:
         self.scheduler.shutdown(wait=False)
         await self.sources.close()
+        try:
+            await self._kalshi_feed.close()
+        except Exception:
+            pass
 
     # ---- Job wrappers ---------------------------------------------------
 
@@ -471,3 +488,38 @@ class AgentScheduler:
                 "🧠 <b>Bias ledger auto-tuned (14-day window)</b>\n"
                 + "\n".join(lines)
             )
+
+    async def kalshi_scan_cycle(self) -> None:
+        """30-second Kalshi intelligence scan.
+
+        Passes the latest AL3X forecast to the engine before each scan
+        so fair values are always based on the freshest model output.
+        """
+        now = datetime.now(cfg.EASTERN)
+        today_str = now.date().isoformat()
+
+        # Feed latest AL3X forecast into the engine
+        latest_fc = self.storage.latest_forecast(today_str)
+        if latest_fc:
+            self._kalshi_engine.update_forecast(latest_fc)
+
+        try:
+            summary = await self._kalshi_engine.run_cycle(today_str)
+            if summary.get("trades_placed", 0) > 0:
+                log.info("Kalshi scan: %d markets, %d patterns, "
+                         "%d decisions, %d trades placed",
+                         summary["markets_scanned"],
+                         summary["patterns_detected"],
+                         summary["decisions_made"],
+                         summary["trades_placed"])
+                if self.notifier.configured:
+                    bankroll = self.storage.get_or_create_bankroll(
+                        cfg.KALSHI_PAPER_MODE)
+                    self.notifier.enqueue(
+                        f"📈 <b>Kalshi trade(s) logged</b>\n"
+                        f"{summary['trades_placed']} position(s) opened\n"
+                        f"Bankroll: ${bankroll['current_bankroll']:.2f} | "
+                        f"Deployed: ${bankroll['total_deployed']:.2f}"
+                    )
+        except Exception as e:  # noqa: BLE001
+            log.info("Kalshi scan cycle error: %s", e)

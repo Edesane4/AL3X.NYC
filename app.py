@@ -180,6 +180,36 @@ async def force_cli_check():
     return {"ok": True}
 
 
+@app.get("/api/kalshi/state")
+async def kalshi_state():
+    storage: Storage = app.state.storage
+    bankroll = storage.get_or_create_bankroll(cfg.KALSHI_PAPER_MODE)
+    open_positions = storage.open_kalshi_positions()
+    pattern_log = storage.recent_pattern_log(hours=24)
+    recent_snaps = {}
+    # Get the latest snapshot per market for the dashboard
+    try:
+        from datetime import date as _date
+        today = _date.today().isoformat()
+        # Pull unique tickers from recent patterns
+        tickers = list({p["market_ticker"] for p in pattern_log
+                        if p.get("market_ticker")})
+        for t in tickers[:20]:
+            snaps = storage.recent_snapshots(t, limit=1)
+            if snaps:
+                recent_snaps[t] = snaps[0]
+    except Exception:
+        pass
+    return JSONResponse({
+        "bankroll": bankroll,
+        "open_positions": open_positions,
+        "pattern_log_24h": pattern_log[:50],
+        "latest_snapshots": recent_snaps,
+        "paper_mode": cfg.KALSHI_PAPER_MODE,
+        "live_trading": cfg.KALSHI_LIVE_TRADING,
+    })
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 
