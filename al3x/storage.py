@@ -147,6 +147,96 @@ CREATE TABLE IF NOT EXISTS regime_shifts (
     weight_reset_applied INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_shift_date ON regime_shifts(target_date);
+
+-- Kalshi orderbook snapshots: rolling 7-day window per market
+CREATE TABLE IF NOT EXISTS kalshi_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    captured_at TEXT NOT NULL,           -- ISO8601 UTC
+    market_ticker TEXT NOT NULL,
+    event_ticker TEXT NOT NULL,
+    threshold_f REAL,                    -- temperature threshold for this contract
+    best_bid REAL,                       -- best bid price (0-1 scale)
+    best_ask REAL,                       -- best ask price (0-1 scale)
+    bid_depth_json TEXT,                 -- [{price, qty}, ...] top 5 levels
+    ask_depth_json TEXT,
+    last_trade_price REAL,
+    last_trade_qty INTEGER,
+    last_trade_side TEXT,                -- 'yes' or 'no'
+    volume_24h INTEGER,
+    open_interest INTEGER,
+    time_to_close_sec INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_ks_ticker_time
+    ON kalshi_snapshots(market_ticker, captured_at);
+CREATE INDEX IF NOT EXISTS idx_ks_captured ON kalshi_snapshots(captured_at);
+
+-- Kalshi recent trades feed
+CREATE TABLE IF NOT EXISTS kalshi_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_id TEXT UNIQUE,                -- Kalshi's own trade ID
+    market_ticker TEXT NOT NULL,
+    executed_at TEXT NOT NULL,
+    price REAL NOT NULL,
+    count INTEGER NOT NULL,
+    side TEXT NOT NULL,                  -- 'yes' or 'no'
+    taker_side TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kt_ticker ON kalshi_trades(market_ticker);
+CREATE INDEX IF NOT EXISTS idx_kt_time ON kalshi_trades(executed_at);
+
+-- Kalshi positions and trade log (paper + live)
+CREATE TABLE IF NOT EXISTS kalshi_positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    market_ticker TEXT NOT NULL,
+    threshold_f REAL,
+    side TEXT NOT NULL,                  -- 'yes' or 'no'
+    entry_price REAL NOT NULL,
+    exit_price REAL,
+    contracts INTEGER NOT NULL,
+    cost_basis REAL NOT NULL,
+    realized_pnl REAL,
+    status TEXT NOT NULL DEFAULT 'open', -- 'open','closed','settled'
+    strategy TEXT NOT NULL,              -- 'model_divergence','running_max','arb'
+    entry_ev REAL,
+    entry_edge_cents REAL,
+    al3x_fair_value REAL,
+    paper_trade INTEGER NOT NULL DEFAULT 1,  -- 1=paper, 0=live
+    notes TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kp_status ON kalshi_positions(status);
+CREATE INDEX IF NOT EXISTS idx_kp_ticker ON kalshi_positions(market_ticker);
+
+-- Orderbook pattern detections
+CREATE TABLE IF NOT EXISTS kalshi_pattern_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    detected_at TEXT NOT NULL,
+    market_ticker TEXT NOT NULL,
+    pattern_type TEXT NOT NULL,
+    details_json TEXT,
+    al3x_fair_value REAL,
+    market_price REAL,
+    edge_cents REAL,
+    acted_on INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_kpl_time ON kalshi_pattern_log(detected_at);
+CREATE INDEX IF NOT EXISTS idx_kpl_type ON kalshi_pattern_log(pattern_type);
+
+-- Bankroll state
+CREATE TABLE IF NOT EXISTS kalshi_bankroll (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at TEXT NOT NULL,
+    starting_bankroll REAL NOT NULL,
+    current_bankroll REAL NOT NULL,
+    total_deployed REAL NOT NULL DEFAULT 0,
+    realized_pnl REAL NOT NULL DEFAULT 0,
+    unrealized_pnl REAL NOT NULL DEFAULT 0,
+    daily_pnl REAL NOT NULL DEFAULT 0,
+    trade_count INTEGER NOT NULL DEFAULT 0,
+    win_count INTEGER NOT NULL DEFAULT 0,
+    paper_mode INTEGER NOT NULL DEFAULT 1
+);
 """
 
 
@@ -271,6 +361,25 @@ class Storage:
                     pass
             except sqlite3.OperationalError:
                 pass
+
+            # Kalshi tables: add any missing columns to kalshi_positions
+            # if the table was created by an older schema version.
+            try:
+                cols = [r["name"] for r in c.execute(
+                    "PRAGMA table_info(kalshi_positions)"
+                ).fetchall()]
+                if "entry_edge_cents" not in cols:
+                    c.execute(
+                        "ALTER TABLE kalshi_positions "
+                        "ADD COLUMN entry_edge_cents REAL"
+                    )
+                if "al3x_fair_value" not in cols:
+                    c.execute(
+                        "ALTER TABLE kalshi_positions "
+                        "ADD COLUMN al3x_fair_value REAL"
+                    )
+            except sqlite3.OperationalError:
+                pass  # table doesn't exist yet; _init_schema handles it
 
     # -- forecasts ---------------------------------------------------------
     def save_forecast(self, row: Dict[str, Any]) -> int:
@@ -692,6 +801,266 @@ class Storage:
                 (f"-{days} days",),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    # -- Kalshi feed storage -------------------------------------------------
+
+    def save_kalshi_snapshot(self, row: Dict[str, Any]) -> None:
+        with self._conn() as c:
+            c.execute(
+                """INSERT INTO kalshi_snapshots
+                   (captured_at, market_ticker, event_ticker, threshold_f,
+                    best_bid, best_ask, bid_depth_json, ask_depth_json,
+                    last_trade_price, last_trade_qty, last_trade_side,
+                    volume_24h, open_interest, time_to_close_sec)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row.get("captured_at") or _utc_now_iso(),
+                    row["market_ticker"],
+                    row.get("event_ticker", ""),
+                    row.get("threshold_f"),
+                    row.get("best_bid"),
+                    row.get("best_ask"),
+                    json.dumps(row.get("bid_depth") or []),
+                    json.dumps(row.get("ask_depth") or []),
+                    row.get("last_trade_price"),
+                    row.get("last_trade_qty"),
+                    row.get("last_trade_side"),
+                    row.get("volume_24h"),
+                    row.get("open_interest"),
+                    row.get("time_to_close_sec"),
+                ),
+            )
+
+    def recent_snapshots(self, market_ticker: str,
+                          limit: int = 10) -> List[Dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM kalshi_snapshots "
+                "WHERE market_ticker=? ORDER BY id DESC LIMIT ?",
+                (market_ticker, limit),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("bid_depth_json", "ask_depth_json"):
+                if d.get(k):
+                    try:
+                        d[k.replace("_json", "")] = json.loads(d[k])
+                    except Exception:
+                        d[k.replace("_json", "")] = []
+                    d.pop(k, None)
+            out.append(d)
+        return out
+
+    def snapshots_for_ticker_since(self, market_ticker: str,
+                                    since_iso: str) -> List[Dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM kalshi_snapshots "
+                "WHERE market_ticker=? AND captured_at >= ? "
+                "ORDER BY captured_at ASC",
+                (market_ticker, since_iso),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for k in ("bid_depth_json", "ask_depth_json"):
+                if d.get(k):
+                    try:
+                        d[k.replace("_json", "")] = json.loads(d[k])
+                    except Exception:
+                        d[k.replace("_json", "")] = []
+                    d.pop(k, None)
+            out.append(d)
+        return out
+
+    def save_kalshi_trade(self, row: Dict[str, Any]) -> None:
+        with self._conn() as c:
+            c.execute(
+                """INSERT OR IGNORE INTO kalshi_trades
+                   (trade_id, market_ticker, executed_at, price,
+                    count, side, taker_side)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    row["trade_id"],
+                    row["market_ticker"],
+                    row["executed_at"],
+                    float(row["price"]),
+                    int(row["count"]),
+                    row["side"],
+                    row.get("taker_side"),
+                ),
+            )
+
+    def recent_trades_for_ticker(self, market_ticker: str,
+                                   minutes: int = 30) -> List[Dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM kalshi_trades "
+                "WHERE market_ticker=? "
+                "AND executed_at >= datetime('now', ?) "
+                "ORDER BY executed_at ASC",
+                (market_ticker, f"-{minutes} minutes"),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def save_kalshi_position(self, row: Dict[str, Any]) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                """INSERT INTO kalshi_positions
+                   (opened_at, market_ticker, threshold_f, side,
+                    entry_price, contracts, cost_basis, status,
+                    strategy, entry_ev, entry_edge_cents,
+                    al3x_fair_value, paper_trade, notes)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    row.get("opened_at") or _utc_now_iso(),
+                    row["market_ticker"],
+                    row.get("threshold_f"),
+                    row["side"],
+                    float(row["entry_price"]),
+                    int(row["contracts"]),
+                    float(row["cost_basis"]),
+                    row.get("status", "open"),
+                    row["strategy"],
+                    row.get("entry_ev"),
+                    row.get("entry_edge_cents"),
+                    row.get("al3x_fair_value"),
+                    int(row.get("paper_trade", 1)),
+                    row.get("notes"),
+                ),
+            )
+            return cur.lastrowid
+
+    def close_kalshi_position(self, position_id: int,
+                               exit_price: float,
+                               realized_pnl: float,
+                               status: str = "closed") -> None:
+        with self._conn() as c:
+            c.execute(
+                """UPDATE kalshi_positions
+                   SET closed_at=?, exit_price=?, realized_pnl=?, status=?
+                   WHERE id=?""",
+                (_utc_now_iso(), float(exit_price),
+                 float(realized_pnl), status, position_id),
+            )
+
+    def open_kalshi_positions(self) -> List[Dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM kalshi_positions WHERE status='open' "
+                "ORDER BY opened_at DESC",
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def save_pattern_detection(self, row: Dict[str, Any]) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                """INSERT INTO kalshi_pattern_log
+                   (detected_at, market_ticker, pattern_type,
+                    details_json, al3x_fair_value, market_price,
+                    edge_cents, acted_on)
+                   VALUES (?,?,?,?,?,?,?,?)""",
+                (
+                    row.get("detected_at") or _utc_now_iso(),
+                    row["market_ticker"],
+                    row["pattern_type"],
+                    json.dumps(row.get("details") or {}),
+                    row.get("al3x_fair_value"),
+                    row.get("market_price"),
+                    row.get("edge_cents"),
+                    int(row.get("acted_on", 0)),
+                ),
+            )
+            return cur.lastrowid
+
+    def recent_pattern_log(self, hours: int = 24) -> List[Dict]:
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM kalshi_pattern_log "
+                "WHERE detected_at >= datetime('now', ?) "
+                "ORDER BY detected_at DESC",
+                (f"-{hours} hours",),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            if d.get("details_json"):
+                try:
+                    d["details"] = json.loads(d["details_json"])
+                except Exception:
+                    d["details"] = {}
+                d.pop("details_json", None)
+            out.append(d)
+        return out
+
+    def get_or_create_bankroll(self, paper_mode: bool = True) -> Dict:
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT * FROM kalshi_bankroll "
+                "WHERE paper_mode=? ORDER BY id DESC LIMIT 1",
+                (int(paper_mode),),
+            ).fetchone()
+            if r:
+                return dict(r)
+            # Bootstrap
+            from . import config as _cfg
+            c.execute(
+                """INSERT INTO kalshi_bankroll
+                   (recorded_at, starting_bankroll, current_bankroll,
+                    total_deployed, realized_pnl, unrealized_pnl,
+                    daily_pnl, trade_count, win_count, paper_mode)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (_utc_now_iso(),
+                 _cfg.KALSHI_STARTING_BANKROLL,
+                 _cfg.KALSHI_STARTING_BANKROLL,
+                 0.0, 0.0, 0.0, 0.0, 0, 0, int(paper_mode)),
+            )
+            r2 = c.execute(
+                "SELECT * FROM kalshi_bankroll "
+                "WHERE paper_mode=? ORDER BY id DESC LIMIT 1",
+                (int(paper_mode),),
+            ).fetchone()
+            return dict(r2)
+
+    def update_bankroll(self, paper_mode: bool,
+                         updates: Dict[str, Any]) -> None:
+        current = self.get_or_create_bankroll(paper_mode)
+        new_vals = {**current, **updates,
+                    "recorded_at": _utc_now_iso()}
+        with self._conn() as c:
+            c.execute(
+                """UPDATE kalshi_bankroll SET
+                   recorded_at=?, current_bankroll=?, total_deployed=?,
+                   realized_pnl=?, unrealized_pnl=?, daily_pnl=?,
+                   trade_count=?, win_count=?
+                   WHERE id=?""",
+                (
+                    new_vals["recorded_at"],
+                    float(new_vals.get("current_bankroll",
+                                        current["current_bankroll"])),
+                    float(new_vals.get("total_deployed",
+                                        current["total_deployed"])),
+                    float(new_vals.get("realized_pnl",
+                                        current["realized_pnl"])),
+                    float(new_vals.get("unrealized_pnl",
+                                        current["unrealized_pnl"])),
+                    float(new_vals.get("daily_pnl", current["daily_pnl"])),
+                    int(new_vals.get("trade_count", current["trade_count"])),
+                    int(new_vals.get("win_count", current["win_count"])),
+                    current["id"],
+                ),
+            )
+
+    def purge_old_kalshi_snapshots(self, days: int = 7) -> int:
+        """Delete snapshots older than `days` days. Call daily."""
+        with self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM kalshi_snapshots "
+                "WHERE captured_at < datetime('now', ?)",
+                (f"-{days} days",),
+            )
+            return cur.rowcount
 
 
 def _forecast_row(r: Optional[sqlite3.Row]) -> Optional[Dict]:

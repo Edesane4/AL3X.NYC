@@ -11,3 +11,5 @@ anthropic>=0.28
 scikit-learn>=1.4
 gspread>=6.0
 google-auth>=2.0
+cryptography>=42.0
+numpy>=1.26

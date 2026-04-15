@@ -102,3 +102,26 @@ ANOMALY_THRESHOLD = 6.0
 
 def env(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
+
+
+# --- Kalshi Market Intelligence -------------------------------------------
+KALSHI_BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
+KALSHI_FEED_INTERVAL_SECONDS = 30       # orderbook poll frequency
+KALSHI_NYC_EVENT_PREFIX = "KXHIGHNYC"  # Kalshi event ticker prefix for NYC high temp
+KALSHI_MIN_EV = 0.04                    # minimum expected value to consider a trade
+KALSHI_MIN_EDGE_CENTS = 5               # minimum fair-value divergence in cents
+KALSHI_MIN_EDGE_PERSIST_CYCLES = 2      # edge must persist this many cycles before entry
+KALSHI_MAX_SPREAD_CENTS = 8             # skip markets where spread exceeds this
+KALSHI_FRACTIONAL_KELLY = 0.25          # quarter-Kelly position sizing
+KALSHI_MAX_SINGLE_POSITION_PCT = 0.08   # 8% bankroll max per contract
+KALSHI_MAX_THRESHOLD_EXPOSURE_PCT = 0.12
+KALSHI_MAX_TOTAL_EXPOSURE_PCT = 0.35
+KALSHI_DAILY_LOSS_LIMIT_PCT = 0.15
+KALSHI_STARTING_BANKROLL = 500.0
+KALSHI_LIVE_TRADING = False             # set True only after paper validation
+KALSHI_PAPER_MODE = True                # log simulated trades without placing real ones
+KALSHI_SPOOF_SIZE_THRESHOLD_PCT = 0.05  # 5% of total depth to flag as spoof candidate
+KALSHI_PANIC_VELOCITY_MULTIPLIER = 3.0
+KALSHI_SMART_MONEY_MIN_CYCLES = 5       # resting cycles to classify as patient capital
+KALSHI_RUNNING_MAX_CERTAINTY_THRESHOLD = 0.95  # buy YES below this when ASOS confirmed
+KALSHI_RUNNING_MAX_MIN_AGE_MINUTES = 30
