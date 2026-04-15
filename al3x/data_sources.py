@@ -689,21 +689,26 @@ def _parse_cli(text: str) -> Optional[Dict[str, Any]]:
     plain = re.sub(r"&nbsp;", " ", plain)
     plain = re.sub(r"[ \t]+", " ", plain)
 
-    date_match = re.search(
-        r"CLIMATE REPORT.*?VALID[^\n]*?"
-        r"(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|"
-        r"SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{1,2})\s+(\d{4})",
-        plain, re.IGNORECASE | re.DOTALL,
-    )
+    # Real NWS CLI products state the covered date in their subject line:
+    #   "...THE CENTRAL PARK NY CLIMATE SUMMARY FOR APRIL 14 2026..."
+    # Older templates used "VALID TODAY <MONTH DAY YYYY>". Try both.
     target_dt: Optional[date] = None
-    if date_match:
-        try:
-            target_dt = datetime.strptime(
-                f"{date_match.group(1)} {date_match.group(2)} {date_match.group(3)}",
-                "%B %d %Y",
-            ).date()
-        except Exception:
-            pass
+    months = (r"(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|"
+              r"SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{1,2})\s+(\d{4})")
+    for pat in (
+        rf"CLIMATE SUMMARY FOR\s+{months}",
+        rf"CLIMATE REPORT.*?VALID[^\n]*?{months}",
+    ):
+        m = re.search(pat, plain, re.IGNORECASE | re.DOTALL)
+        if m:
+            try:
+                target_dt = datetime.strptime(
+                    f"{m.group(1)} {m.group(2)} {m.group(3)}",
+                    "%B %d %Y",
+                ).date()
+                break
+            except Exception:
+                pass
 
     max_match = re.search(r"MAXIMUM\s+(-?\d+)", plain, re.IGNORECASE)
     if not max_match:

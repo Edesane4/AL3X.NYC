@@ -96,12 +96,12 @@ class AgentScheduler:
             CronTrigger(hour="18-23", minute="0,30", timezone=str(cfg.EASTERN)),
             id="night_before",
         )
-        # GAP 4 — CLI polling 5 PM – 9:59 PM Eastern every 10 min to catch
-        # late postings on complex-weather evenings. Already-verified dates
-        # are skipped via _cli_verified_for so extra polls are cheap.
+        # CLI posts the morning AFTER the day it covers, not the same
+        # evening. Poll every 15 min from midnight to noon Eastern to
+        # catch the previous day's CLI as soon as NWS OKX issues it.
         self.scheduler.add_job(
             self._safe(self.cli_verification_cycle),
-            CronTrigger(hour="17-21", minute="0,10,20,30,40,50",
+            CronTrigger(hour="0-11", minute="0,15,30,45",
                         timezone=str(cfg.EASTERN)),
             id="cli_verify",
         )
@@ -290,8 +290,12 @@ class AgentScheduler:
         if not forced:
             if runs_done >= 3:
                 return
-            today_key = now.date().isoformat()
-            cli_ready = today_key in self._cli_verified_for
+            # NWS CLI posts the morning AFTER the day it covers, so "fresh
+            # truth" by the evening of day D means YESTERDAY's CLI is in
+            # the verified set. That is the learning-ready signal for
+            # night-before run #3.
+            yesterday_key = (now - timedelta(days=1)).date().isoformat()
+            cli_ready = yesterday_key in self._cli_verified_for
             # Gate runs by time-of-day / CLI readiness
             if runs_done == 0:
                 if now.hour < 18:
@@ -337,38 +341,46 @@ class AgentScheduler:
 
     # ---- CLI verification ----------------------------------------------
     async def cli_verification_cycle(self) -> None:
+        """NWS CLI posts the morning AFTER the day it covers. When we
+        poll, we trust the CLI's own valid date (typically yesterday
+        local) rather than assuming it describes "today".
+        """
         now = datetime.now(cfg.EASTERN)
-        today = now.date()
-        today_str = today.isoformat()
-        if today_str in self._cli_verified_for:
-            return
         cli = await self.sources.cli_latest()
         if not cli:
             return
-        # Guard: CLI must be for today
-        if cli.get("target_date") and cli["target_date"] != today_str:
-            return
-        self.storage.save_cli_truth(today_str, cli["recorded_high_f"],
-                                    cli["posted_at"], cli["raw_text"])
-        self._cli_verified_for.add(today_str)
 
-        # Score forecasts
-        result = self.learning.score_day(today_str, cli["recorded_high_f"])
-        latest = self.storage.latest_forecast(today_str)
+        # Use the date the CLI itself reports. If it can't be parsed out,
+        # fall back to yesterday local Eastern (the normal coverage day).
+        target_date = cli.get("target_date")
+        if not target_date:
+            target_date = (now - timedelta(days=1)).date().isoformat()
+
+        if target_date in self._cli_verified_for:
+            return
+
+        self.storage.save_cli_truth(target_date, cli["recorded_high_f"],
+                                    cli["posted_at"], cli["raw_text"])
+        self._cli_verified_for.add(target_date)
+
+        # Score the forecasts that were issued for this target date
+        result = self.learning.score_day(target_date, cli["recorded_high_f"])
+        latest = self.storage.latest_forecast(target_date)
         best_f = latest["final_f"] if latest else cli["recorded_high_f"]
         err = cli["recorded_high_f"] - best_f
         log.info("CLI verified %s: %.1f°F (err %+.2f, scored=%s)",
-                 today_str, cli["recorded_high_f"], err, result.get("scored"))
+                 target_date, cli["recorded_high_f"], err,
+                 result.get("scored"))
         if self.notifier.configured:
             self.notifier.enqueue(
-                format_cli_confirmation(today_str, cli["recorded_high_f"],
+                format_cli_confirmation(target_date, cli["recorded_high_f"],
                                          best_f, err)
             )
 
         # Sheets: append a daily-result row with all the relevant fields
         if self.sheets and self.sheets.enabled:
             try:
-                night_fc = self._get_night_before_for_date(today_str)
+                night_fc = self._get_night_before_for_date(target_date)
                 extras = (latest.get("extras") or {}) if latest else {}
                 regime = extras.get("regime") or {}
                 sources = (latest.get("sources") or {}) if latest else {}
@@ -405,13 +417,14 @@ class AgentScheduler:
                     "spread": extras.get("spread_f", ""),
                 }
                 await asyncio.to_thread(
-                    self.sheets.push_daily_result, today_str, data,
+                    self.sheets.push_daily_result, target_date, data,
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("Sheets daily push failed: %s", e)
 
-        # Trigger night-before for tomorrow now that truth is in (run #3
-        # gate is "CLI verified", which is now true).
+        # Trigger night-before for tomorrow. The night-before run-3 gate
+        # is "today_local is CLI-verified" — which only matters if we
+        # just verified today (unlikely, but harmless either way).
         await self.night_before_cycle()
 
     # ---- Auto-tune ------------------------------------------------------
