@@ -107,7 +107,7 @@ def env(name: str, default: str = "") -> str:
 # --- Kalshi Market Intelligence -------------------------------------------
 KALSHI_BASE_URL = "https://trading-api.kalshi.com/trade-api/v2"
 KALSHI_FEED_INTERVAL_SECONDS = 30       # orderbook poll frequency
-KALSHI_NYC_EVENT_PREFIX = "KXHIGHNYC"  # Kalshi event ticker prefix for NYC high temp
+KALSHI_NYC_EVENT_PREFIX = "KXHIGHNY"  # Kalshi event ticker prefix for NYC high temp
 KALSHI_MIN_EV = 0.04                    # minimum expected value to consider a trade
 KALSHI_MIN_EDGE_CENTS = 5               # minimum fair-value divergence in cents
 KALSHI_MIN_EDGE_PERSIST_CYCLES = 2      # edge must persist this many cycles before entry
@@ -125,3 +125,5 @@ KALSHI_PANIC_VELOCITY_MULTIPLIER = 3.0
 KALSHI_SMART_MONEY_MIN_CYCLES = 5       # resting cycles to classify as patient capital
 KALSHI_RUNNING_MAX_CERTAINTY_THRESHOLD = 0.95  # buy YES below this when ASOS confirmed
 KALSHI_RUNNING_MAX_MIN_AGE_MINUTES = 30
+KALSHI_FEE_PER_CONTRACT = 0.009   # ~0.9¢ taker fee on winning side
+KALSHI_MIN_NET_EV = 0.04 + KALSHI_FEE_PER_CONTRACT  # net-of-fee EV floor

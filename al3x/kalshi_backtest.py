@@ -89,6 +89,15 @@ class KalshiBacktest:
 
         log.info("Backtest starting: %d days back from %s", days_back, today)
 
+        # Load all forecast rows once and index by target_date.
+        # This avoids O(N²) DB queries (one full join per day).
+        all_fc_rows = self.storage.forecasts_with_truth(
+            days=days_back + 5, prefer_mode="night_before")
+        fc_by_date: Dict[str, Any] = {
+            r["target_date"]: r for r in all_fc_rows
+            if r.get("target_date")
+        }
+
         for days_ago in range(1, days_back + 1):
             target = today - timedelta(days=days_ago)
             target_str = target.isoformat()
@@ -102,11 +111,7 @@ class KalshiBacktest:
 
             cli_high = float(cli_truth["recorded_high_f"])
 
-            # Get AL3X forecast for this date (prefer night_before)
-            fc_rows = self.storage.forecasts_with_truth(
-                days=days_back + 5, prefer_mode="night_before")
-            fc = next((r for r in fc_rows
-                        if r.get("target_date") == target_str), None)
+            fc = fc_by_date.get(target_str)
             if not fc:
                 log.debug("Backtest: no AL3X forecast for %s", target_str)
                 continue
@@ -209,10 +214,9 @@ class KalshiBacktest:
                     side, entry_price, contracts, settlement)
 
                 simulated_deployed += cost
-                if pnl > 0:
-                    simulated_bankroll += pnl - cost
-                else:
-                    simulated_bankroll -= cost
+                # pnl from _compute_settlement_pnl is already net
+                # (payout - entry) × contracts. Add directly.
+                simulated_bankroll += pnl
 
                 day_results.append({
                     "run_at": run_at,

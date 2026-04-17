@@ -545,7 +545,7 @@ class Forecaster:
             hourly_task, nbm_task, grid_task, hrrr_task, ecmwf_task, gfs_task,
         )
 
-        running_max_f, _ = running_max(obs_today)
+        running_max_f, running_max_ts = running_max(obs_today)
 
         # Assemble raw values
         raw_values: Dict[str, Optional[float]] = {
@@ -840,6 +840,7 @@ class Forecaster:
             # hardcoded seasonal fallback.
             "surface_dewpoint_f": live_dewpoint_f,
             "surface_wind_speed_kt": live_wind_speed_kt,
+            "running_max_observed_at": running_max_ts,
         }
 
         return {

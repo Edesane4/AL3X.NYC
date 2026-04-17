@@ -953,6 +953,23 @@ class Storage:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def positions_needing_settlement(self,
+                                      target_date: str) -> List[Dict]:
+        """Return all open positions whose market closed on target_date
+        and have not yet been settled.
+
+        Used nightly to settle positions against CLI truth.
+        """
+        with self._conn() as c:
+            rows = c.execute(
+                "SELECT * FROM kalshi_positions "
+                "WHERE status='open' "
+                "AND substr(opened_at, 1, 10) <= ? "
+                "ORDER BY opened_at ASC",
+                (target_date,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def save_pattern_detection(self, row: Dict[str, Any]) -> int:
         with self._conn() as c:
             cur = c.execute(

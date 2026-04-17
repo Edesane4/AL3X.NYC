@@ -184,7 +184,7 @@ def compute_edge(fair_value: float,
         "market_price": market_price,
         "fair_value": fair_value,
         "actionable": (abs(edge_cents) >= cfg.KALSHI_MIN_EDGE_CENTS
-                       and ev >= cfg.KALSHI_MIN_EV),
+                       and ev >= cfg.KALSHI_MIN_NET_EV),
     }
 
 

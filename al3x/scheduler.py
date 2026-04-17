@@ -143,6 +143,18 @@ class AgentScheduler:
             id="kalshi_scan",
             next_run_time=datetime.now(cfg.EASTERN) + timedelta(seconds=15),
         )
+        # Daily settlement — runs at 9:30 PM Eastern after markets close
+        self.scheduler.add_job(
+            self._safe(self.settle_positions_cycle),
+            CronTrigger(hour=21, minute=30, timezone=str(cfg.EASTERN)),
+            id="settle_positions",
+        )
+        # Reset daily P&L at midnight Eastern
+        self.scheduler.add_job(
+            self._safe(self.reset_daily_pnl),
+            CronTrigger(hour=0, minute=1, timezone=str(cfg.EASTERN)),
+            id="reset_daily_pnl",
+        )
         self.scheduler.start()
         log.info("AL3X.NYC scheduler started (all jobs armed).")
 
@@ -523,3 +535,35 @@ class AgentScheduler:
                     )
         except Exception as e:  # noqa: BLE001
             log.info("Kalshi scan cycle error: %s", e)
+
+    async def settle_positions_cycle(self) -> None:
+        """Settle all open Kalshi positions against today's CLI truth."""
+        now = datetime.now(cfg.EASTERN)
+        today_str = now.date().isoformat()
+        try:
+            result = await self._kalshi_engine.settle_positions(today_str)
+            log.info("Settlement cycle: %d positions settled, "
+                     "total P&L %+.4f, errors=%s",
+                     result["settled"], result["total_pnl"],
+                     result["errors"])
+            if result["settled"] > 0 and self.notifier.configured:
+                bankroll = self.storage.get_or_create_bankroll(
+                    cfg.KALSHI_PAPER_MODE)
+                self.notifier.enqueue(
+                    f"💰 <b>Settlement complete — {today_str}</b>\n"
+                    f"Positions settled: {result['settled']}\n"
+                    f"Session P&L: {result['total_pnl']:+.2f}\n"
+                    f"Bankroll: ${bankroll['current_bankroll']:.2f}"
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("Settlement cycle error: %s", e)
+
+    async def reset_daily_pnl(self) -> None:
+        """Reset daily_pnl to 0.0 at midnight so CB1 does not
+        permanently halt trading after a single bad day."""
+        try:
+            self.storage.update_bankroll(
+                cfg.KALSHI_PAPER_MODE, {"daily_pnl": 0.0})
+            log.info("Daily P&L counter reset at midnight.")
+        except Exception as e:  # noqa: BLE001
+            log.warning("daily_pnl reset failed: %s", e)

@@ -75,6 +75,13 @@ def strategy_model_divergence(
     if edge_cents < cfg.KALSHI_MIN_EDGE_CENTS:
         return None
 
+    # Net-of-fee EV check: subtract expected fee cost from EV
+    # Fee is paid on winning side only: P_win × fee_per_contract
+    p_win = fv if edge["side"] == "yes" else (1.0 - fv)
+    net_ev = edge["ev"] - (p_win * cfg.KALSHI_FEE_PER_CONTRACT)
+    if net_ev < cfg.KALSHI_MIN_NET_EV:
+        return None
+
     # Check persistence: edge must have existed in prior cycles too
     persist_count = 1
     min_persist = cfg.KALSHI_MIN_EDGE_PERSIST_CYCLES
@@ -117,6 +124,13 @@ def strategy_model_divergence(
                 confidence_boost += 0.04
                 amplifiers.append("smart_money_aligns")
 
+    # Apply confidence boost to Kelly sizing.
+    # confidence_boost is in [0, 0.12] from the amplifiers above.
+    # We apply it as a mild multiplier on the fractional Kelly:
+    # at max boost (0.12), size increases by ~12%.
+    # This is bounded so it never exceeds 1.5× normal sizing.
+    kelly_boost_multiplier = min(1.5, 1.0 + confidence_boost)
+
     # Size the position
     exposure = _get_exposure(open_positions, market_ticker, bankroll)
     entry_price = (best_ask if edge["side"] == "yes"
@@ -132,6 +146,18 @@ def strategy_model_divergence(
         current_threshold_exposure=exposure["threshold"],
         strategy="model_divergence",
     )
+    # Apply confidence boost to contract count (already Kelly-capped)
+    if kelly_boost_multiplier > 1.0 and sizing["contracts"] > 0:
+        boosted_contracts = int(sizing["contracts"] * kelly_boost_multiplier)
+        # Re-check single position cap after boost
+        max_contracts_by_cap = int(
+            (current_bankroll * cfg.KALSHI_MAX_SINGLE_POSITION_PCT)
+            / entry_price
+        )
+        sizing = dict(sizing)
+        sizing["contracts"] = min(boosted_contracts, max_contracts_by_cap)
+        sizing["cost_basis"] = round(
+            sizing["contracts"] * entry_price, 4)
 
     if sizing["contracts"] == 0:
         return None
@@ -195,6 +221,11 @@ def strategy_running_max_arb(
     fair_value = 0.99
     edge_cents = round((certainty - best_ask) * 100, 1)
     ev = compute_edge(fair_value, best_ask, "yes")["ev"]
+
+    # Running max has near-certain win probability
+    net_ev_arb = ev - (0.99 * cfg.KALSHI_FEE_PER_CONTRACT)
+    if net_ev_arb < cfg.KALSHI_MIN_NET_EV:
+        return None
 
     exposure = _get_exposure(open_positions, market_ticker, bankroll)
     current_bankroll = float(bankroll.get("current_bankroll",
@@ -273,6 +304,10 @@ def strategy_monotonicity_arb(
                 or upper_spread > cfg.KALSHI_MAX_SPREAD_CENTS):
             continue
 
+        # Use the worst-leg spread for CB3 evaluation in the caller.
+        # Store it in the decision so the engine can pass it to check_all.
+        worst_spread_cents = max(lower_spread, upper_spread)
+
         # Size each leg at half the arb allocation
         fv_lower = (fair_values.get(v["lower_ticker"]) or {}).get(
             "fair_value", 0.55)
@@ -304,6 +339,7 @@ def strategy_monotonicity_arb(
         decisions.append({
             "strategy": "arb",
             "arb_cents": v["arb_cents"],
+            "worst_spread_cents": worst_spread_cents,
             "legs": [
                 {
                     "action": "buy",

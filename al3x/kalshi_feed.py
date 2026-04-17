@@ -298,9 +298,16 @@ def _parse_threshold(title: str) -> Optional[float]:
     Examples handled:
       'Will the NYC high temp exceed 72°F on Apr 14?' → 72.0
       'NYC High Temp > 68F'                           → 68.0
+      'KXHIGHNY-20260414-T72'                         → 72.0 (ticker fallback)
     """
     import re
+    # Primary: human-readable title with °F marker
     m = re.search(r"(\d+(?:\.\d+)?)\s*[°º]?\s*F", title, re.IGNORECASE)
     if m:
         return float(m.group(1))
+    # Secondary: Kalshi ticker format KXHIGHNY-YYYYMMDD-T{threshold}
+    # e.g. "KXHIGHNY-20260414-T72" → 72.0
+    m2 = re.search(r"-T(\d+(?:\.\d+)?)(?:$|-)", title)
+    if m2:
+        return float(m2.group(1))
     return None
