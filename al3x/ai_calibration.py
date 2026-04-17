@@ -21,7 +21,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 log = logging.getLogger("al3x.ai_calibration")
 
-_MODEL = "claude-sonnet-4-20250514"
+_MODEL = os.environ.get("AL3X_CLAUDE_MODEL", "claude-sonnet-4-5")
 _CACHE_TTL_SECONDS = 20 * 60
 _DELTA_CAP = 2.0
 
