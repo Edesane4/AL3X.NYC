@@ -525,6 +525,9 @@ class Forecaster:
         nbm_task     = asyncio.create_task(self.sources.nws_daily_max(target_date))
         grid_task    = asyncio.create_task(self.sources.nws_grid_data(target_date))
         gfs_task     = asyncio.create_task(self.sources.gfs_mos(target_date))
+        # UPGRADE A — GEFS ensemble spread (native forecast sigma)
+        gefs_task    = asyncio.create_task(
+            self.sources.gfs_ensemble_spread(target_date))
 
         # Await ASOS first so we can pass obs to the diurnal fitter
         obs = await asos_task
@@ -548,8 +551,11 @@ class Forecaster:
             self.sources.ecmwf(target_date, also_obs=obs_today))
 
         # Await all remaining tasks concurrently
-        nws_r, nbm_r, grid_r, hrrr_r, ecmwf_r, gfs_r = await asyncio.gather(
-            hourly_task, nbm_task, grid_task, hrrr_task, ecmwf_task, gfs_task,
+        nws_r, nbm_r, grid_r, hrrr_r, ecmwf_r, gfs_r, gefs_r = (
+            await asyncio.gather(
+                hourly_task, nbm_task, grid_task, hrrr_task, ecmwf_task,
+                gfs_task, gefs_task,
+            )
         )
 
         running_max_f, running_max_ts = running_max(obs_today)
@@ -561,6 +567,8 @@ class Forecaster:
             "gfs_mos": gfs_r.value,
             "ecmwf": ecmwf_r.value,
             "nbm": nbm_r.value,
+            # UPGRADE A — GEFS ensemble mean participates in the ensemble
+            "gfs_ensemble": gefs_r.value,
         }
         if mode == "intraday":
             raw_values["asos_trend"] = _asos_trend_projection(
@@ -823,12 +831,24 @@ class Forecaster:
         if mode == "intraday" and running_max_f is not None:
             final = max(final, running_max_f)
 
-        # Uncertainty — QRF interval width is the best-calibrated sigma
-        # when available; BMA sigma is second choice; heuristic is last.
+        # Uncertainty — priority order:
+        #   QRF interval width > GEFS native spread > BMA sigma > heuristic
+        # UPGRADE A — GEFS ensemble stddev is the natively-calibrated
+        # forecast sigma and doesn't need any local training to be
+        # meaningful. It carries us through the cold-start window where
+        # QRF/BMA haven't yet accumulated enough history.
+        gefs_sigma = None
+        if gefs_r and gefs_r.meta:
+            s = gefs_r.meta.get("sigma_f")
+            if s is not None:
+                gefs_sigma = float(s)
+
         if qrf_result is not None:
             # Half of the 80% prediction interval ≈ 1-sigma for a
             # roughly-symmetric residual distribution.
             uncertainty = max(0.5, qrf_result["interval_width"] / 2.0)
+        elif gefs_sigma is not None:
+            uncertainty = max(0.5, gefs_sigma)
         elif bma_result is not None:
             uncertainty = float(bma_result["bma_variance_f"])
         else:
@@ -849,7 +869,8 @@ class Forecaster:
         # Build sources dict for storage (include all attempted sources)
         sources_persist: Dict[str, Dict[str, Any]] = {}
         for name in ("hrrr", "nws_point", "gfs_mos",
-                     "ecmwf", "nbm", "asos_trend", "kalman"):
+                     "ecmwf", "nbm", "asos_trend", "kalman",
+                     "gfs_ensemble"):
             sources_persist[name] = {
                 "value": raw_values.get(name),
                 "weight": weights.get(name, 0.0) if name in source_values else 0.0,
@@ -857,6 +878,7 @@ class Forecaster:
                     "hrrr": hrrr_r.error, "nws_point": nws_r.error,
                     "gfs_mos": gfs_r.error,
                     "ecmwf": ecmwf_r.error, "nbm": nbm_r.error,
+                    "gfs_ensemble": gefs_r.error,
                 }.get(name),
             }
 
@@ -887,6 +909,16 @@ class Forecaster:
             "surface_dewpoint_f": live_dewpoint_f,
             "surface_wind_speed_kt": live_wind_speed_kt,
             "running_max_observed_at": running_max_ts,
+            # UPGRADE A — GEFS ensemble statistics (natively-calibrated
+            # sigma). Also carries n_members and p10/p50/p90.
+            "gfs_ensemble": ({
+                "value": gefs_r.value,
+                "sigma_f": gefs_r.meta.get("sigma_f"),
+                "p10": gefs_r.meta.get("p10"),
+                "p50": gefs_r.meta.get("p50"),
+                "p90": gefs_r.meta.get("p90"),
+                "n_members": gefs_r.meta.get("n_members"),
+            } if gefs_r and gefs_r.value is not None else None),
         }
 
         return {

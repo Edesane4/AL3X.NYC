@@ -47,32 +47,38 @@ HTTP_TIMEOUT = 20.0
 # Weights are dicts keyed by source name. They must sum to ~1.0 but the
 # forecaster re-normalizes anything missing.
 NIGHT_BEFORE_WEIGHTS: Dict[str, float] = {
-    # NAM-MOS removed (IEM doesn't archive it for KNYC). The 15% that was
-    # on NAM is redistributed proportionally across the remaining four.
-    "hrrr": 0.30,
-    "nws_point": 0.25,
-    "gfs_mos": 0.25,
-    "ecmwf": 0.20,
+    # UPGRADE A — gfs_ensemble carved out at 0.10; the remaining 0.90 is
+    # distributed proportionally from the pre-GEFS layout (hrrr 30,
+    # nws_point 25, gfs_mos 25, ecmwf 20 → each × 0.90).
+    "hrrr": 0.27,
+    "nws_point": 0.225,
+    "gfs_mos": 0.225,
+    "ecmwf": 0.18,
+    "gfs_ensemble": 0.10,
 }
 
+# UPGRADE A — gfs_ensemble weight at 0.05 in intraday (slower-responding
+# than HRRR); remaining 0.95 scales the pre-GEFS layouts.
 INTRADAY_WEIGHTS_0_6 = {
-    "hrrr": 0.50,
-    "nws_point": 0.30,
-    "asos_trend": 0.20,
+    "hrrr": 0.475,
+    "nws_point": 0.285,
+    "asos_trend": 0.19,
+    "gfs_ensemble": 0.05,
 }
 INTRADAY_WEIGHTS_6_12 = {
-    "hrrr": 0.35,
-    "nws_point": 0.25,
-    "gfs_mos": 0.20,
-    "ecmwf": 0.10,
-    "asos_trend": 0.10,
+    "hrrr": 0.3325,
+    "nws_point": 0.2375,
+    "gfs_mos": 0.19,
+    "ecmwf": 0.095,
+    "asos_trend": 0.095,
+    "gfs_ensemble": 0.05,
 }
 INTRADAY_WEIGHTS_12_24 = {
-    # NAM-MOS removed; its 10% redistributed to HRRR/ECMWF.
-    "hrrr": 0.22,
-    "nws_point": 0.25,
-    "gfs_mos": 0.20,
-    "ecmwf": 0.33,
+    "hrrr": 0.209,
+    "nws_point": 0.2375,
+    "gfs_mos": 0.19,
+    "ecmwf": 0.3135,
+    "gfs_ensemble": 0.05,
 }
 
 # --- Default bias corrections ------------------------------------------------

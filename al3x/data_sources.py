@@ -421,6 +421,96 @@ class DataSources:
         return await self.open_meteo(target_date, "ecmwf_ifs04", "ecmwf",
                                      also_obs=also_obs)
 
+    # ---- UPGRADE A: GEFS ensemble spread -------------------------------
+    async def gfs_ensemble_spread(self, target_date: date) -> SourceResult:
+        """Fetch all GEFS members from Open-Meteo and return the daily-
+        max distribution: mean, sigma, p10/p50/p90.
+
+        GEFS runs the GFS 30+ times with perturbed initial conditions.
+        The spread of the member daily maxes IS the natively-calibrated
+        forecast sigma — no historical data required. Use this as a
+        cold-start uncertainty source when QRF and BMA lack training.
+
+        Open-Meteo serves the ensemble under ``gfs_seamless`` with
+        ``ensemble=True`` — each member comes back as
+        ``temperature_2m_member01`` ... ``temperature_2m_memberNN``.
+        """
+        try:
+            params = {
+                "latitude": cfg.LAT, "longitude": cfg.LON,
+                "hourly": "temperature_2m",
+                "models": "gfs_seamless",
+                "temperature_unit": "fahrenheit",
+                "timezone": "America/New_York",
+                "forecast_days": 3,
+                "ensemble": "true",
+            }
+            r = await self._client.get(cfg.OPEN_METEO, params=params,
+                                       timeout=25.0)
+            r.raise_for_status()
+            js = r.json()
+            hourly = js.get("hourly", {}) or {}
+            times = hourly.get("time", []) or []
+            if not times:
+                return SourceResult("gfs_ensemble", error="empty hourly")
+
+            # Index hours that fall on the target date
+            idx_today: List[int] = []
+            for i, ts in enumerate(times):
+                try:
+                    dt = _parse_dt(ts)
+                except Exception:
+                    continue
+                if dt.date() == target_date:
+                    idx_today.append(i)
+            if not idx_today:
+                return SourceResult("gfs_ensemble",
+                                    error="no target-date hours")
+
+            # Collect all member series. Open-Meteo keys are either
+            # temperature_2m_memberNN or temperature_2m (member 00).
+            member_maxes: List[float] = []
+            for key, series in hourly.items():
+                if not key.startswith("temperature_2m"):
+                    continue
+                if not isinstance(series, list):
+                    continue
+                vals = [series[i] for i in idx_today
+                        if i < len(series) and series[i] is not None]
+                if vals:
+                    member_maxes.append(float(max(vals)))
+
+            if len(member_maxes) < 3:
+                return SourceResult(
+                    "gfs_ensemble",
+                    error=f"only {len(member_maxes)} members parsed",
+                )
+
+            member_maxes.sort()
+            n = len(member_maxes)
+            mean = sum(member_maxes) / n
+            # Population std-dev of the ensemble (this IS the forecast sigma)
+            var = sum((x - mean) ** 2 for x in member_maxes) / n
+            sigma = var ** 0.5
+            p10 = member_maxes[max(0, int(0.10 * (n - 1)))]
+            p50 = member_maxes[n // 2]
+            p90 = member_maxes[min(n - 1, int(0.90 * (n - 1)))]
+            return SourceResult(
+                "gfs_ensemble",
+                value=mean,
+                meta={
+                    "sigma_f": sigma,
+                    "p10": p10,
+                    "p50": p50,
+                    "p90": p90,
+                    "n_members": n,
+                    "members": member_maxes,
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            log.info("gfs_ensemble fetch failed: %s", e)
+            return SourceResult("gfs_ensemble", error=str(e))
+
     # ---- CLI verification feed -----------------------------------------
     async def cli_latest(self) -> Optional[Dict[str, Any]]:
         try:
