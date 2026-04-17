@@ -1,0 +1,12 @@
+000
+CDUS41 KOKX 990530
+CLINYC
+
+CLIMATE REPORT
+NATIONAL WEATHER SERVICE NEW YORK NY
+-- malformed / truncated; no TEMPERATURE section at all --
+
+PRECIPITATION (IN)
+  TODAY           0.00
+
+$$

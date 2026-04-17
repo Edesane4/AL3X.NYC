@@ -1,0 +1,31 @@
+000
+CDUS41 KOKX 200530
+CLINYC
+
+CLIMATE REPORT
+NATIONAL WEATHER SERVICE NEW YORK NY
+130 AM EDT MON JUL 19 2026
+
+...THE CENTRAL PARK NY CLIMATE SUMMARY FOR JULY 18 2026...
+
+PRIOR RECORDS (placed above main table by an older template variant)
+   RECORD MAXIMUM   102  IN 1953
+   NORMAL MAXIMUM    85
+   MAXIMUM TEMPERATURE LAST YEAR   88
+
+
+WEATHER ITEM   OBSERVED TIME    RECORD YEAR NORMAL DEPARTURE LAST
+                VALUE   (LST)    VALUE       VALUE  FROM      YEAR
+                                                    NORMAL
+................................................................
+TEMPERATURE (F)
+ MAXIMUM         94    330 PM    102   1953    85        9      88
+ MINIMUM         76    530 AM     61   1895    70        6      72
+ AVERAGE         85                              78        7      80
+
+
+PRECIPITATION (IN)
+  TODAY           0.00
+
+
+$$

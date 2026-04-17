@@ -1,0 +1,75 @@
+000
+CDUS41 KOKX 160530
+CLINYC
+
+CLIMATE REPORT
+NATIONAL WEATHER SERVICE NEW YORK NY
+130 AM EDT TUE APR 15 2026
+
+...................................
+
+...THE CENTRAL PARK NY CLIMATE SUMMARY FOR APRIL 14 2026...
+
+CLIMATE NORMAL PERIOD 1991 TO 2020
+CLIMATE RECORD PERIOD 1869 TO 2026
+
+
+WEATHER ITEM   OBSERVED TIME    RECORD YEAR NORMAL DEPARTURE LAST
+                VALUE   (LST)    VALUE       VALUE  FROM      YEAR
+                                                    NORMAL
+................................................................
+TEMPERATURE (F)
+ MAXIMUM         78    258 PM     91   2002    62       16      68
+ MINIMUM         54    605 AM     27   1895    43       11      49
+ AVERAGE         66                              53       13      59
+
+
+PRECIPITATION (IN)
+  TODAY           0.00                0.57  1919     0.12  -0.12   0.00
+  MONTH TO DATE   1.22                                 1.81  -0.59
+  SINCE JAN 1    10.92                                11.01  -0.09
+  SINCE JUL 1    33.41                                31.44   1.97
+
+
+SNOWFALL (IN)
+  TODAY           0.0                                   0.0    0.0    0.0
+  MONTH TO DATE   0.0                                   0.0    0.0
+  SINCE JUL 1    25.6                                  25.1    0.5
+  SNOW DEPTH      0
+
+
+DEGREE DAYS
+  HEATING TODAY                  0                      12    -12
+  COOLING TODAY                  1                       0      1
+
+
+WIND (MPH)
+  HIGHEST WIND SPEED   13  HIGHEST WIND DIRECTION   260 (W)
+  HIGHEST GUST SPEED   20  HIGHEST GUST DIRECTION   250 (WSW)
+  AVERAGE WIND SPEED    6.5
+
+
+SKY COVER
+  AVERAGE SKY COVER  0.3
+
+
+WEATHER CONDITIONS
+   NONE REPORTED
+
+
+RELATIVE HUMIDITY (PERCENT)
+ HIGHEST    84           600 AM
+ LOWEST     30           300 PM
+ AVERAGE    57
+
+
+..........................................................
+
+
+THE FOLLOWING ARE TODAY'S CLIMATIC VALUES FOR NEW YORK CITY.
+
+TEMPERATURE
+   RECORD HIGH     91  IN 2002
+   RECORD LOW      27  IN 1895
+
+$$

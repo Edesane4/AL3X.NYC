@@ -685,6 +685,15 @@ def _parse_mos_max(text: str, target_date: date) -> Optional[float]:
 
 
 def _parse_cli(text: str) -> Optional[Dict[str, Any]]:
+    """Parse an NWS CLI product into {target_date, recorded_high_f, ...}.
+
+    FIX 1 — anchor the MAXIMUM regex to the observed-temperature section.
+    CLI products contain multiple sections with a "MAXIMUM" token
+    (observed, record, normal, last-year). The naive regex
+    ``MAXIMUM\\s+(\\d+)`` matches whichever appears first — on current
+    templates that's typically the climatological normal, which had been
+    silently poisoning every scored forecast.
+    """
     plain = re.sub(r"<[^>]+>", "\n", text)
     plain = re.sub(r"&nbsp;", " ", plain)
     plain = re.sub(r"[ \t]+", " ", plain)
@@ -710,12 +719,12 @@ def _parse_cli(text: str) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
 
-    max_match = re.search(r"MAXIMUM\s+(-?\d+)", plain, re.IGNORECASE)
-    if not max_match:
+    recorded = _extract_observed_max(plain)
+    if recorded is None:
         return None
-    try:
-        recorded = float(max_match.group(1))
-    except ValueError:
+    if not (-50.0 <= recorded <= 130.0):
+        log.error("CLI observed max %s out of sane °F range; rejecting",
+                  recorded)
         return None
 
     return {
@@ -724,6 +733,105 @@ def _parse_cli(text: str) -> Optional[Dict[str, Any]]:
         "posted_at": datetime.now(timezone.utc).isoformat(),
         "raw_text": plain[:4000],
     }
+
+
+# Major CLI section headers used to bound the observed-temperature block.
+_CLI_NEXT_SECTIONS = (
+    "PRECIPITATION (IN)", "PRECIPITATION",
+    "SNOWFALL (IN)", "SNOWFALL",
+    "DEGREE DAYS",
+    "WIND (MPH)", "WIND",
+    "SKY COVER",
+    "WEATHER CONDITIONS",
+    "RELATIVE HUMIDITY",
+    "THE FOLLOWING",
+)
+
+
+def _extract_observed_max(plain: str) -> Optional[float]:
+    """Return the observed daily-high °F from a CLI plain-text product.
+
+    Strategy:
+      1. Find the TEMPERATURE section header (``TEMPERATURE`` optionally
+         followed by ``(F)`` / ``(^F)``).
+      2. Slice up to the next major section header.
+      3. Inside that slice, find a ``MAXIMUM`` line that is NOT
+         ``RECORD MAXIMUM``, ``NORMAL MAXIMUM``, or ``MAXIMUM
+         TEMPERATURE LAST YEAR``. First integer on that line is the
+         observed high.
+      4. If the section parse fails, use a defensive global regex that
+         explicitly excludes lines preceded by RECORD / NORMAL / LAST
+         YEAR within 30 characters. Log a warning when this fires so
+         operators notice template drift.
+    """
+    section = _observed_section(plain)
+    if section is not None:
+        val = _first_observed_max_in_section(section)
+        if val is not None:
+            return val
+        log.warning("CLI observed-section parsed but no MAXIMUM line found; "
+                    "falling back to defensive global regex")
+    else:
+        log.warning("CLI TEMPERATURE section not found; "
+                    "falling back to defensive global regex")
+
+    # Fallback: global regex that excludes RECORD / NORMAL / LAST YEAR
+    # within 30 characters preceding the MAXIMUM token.
+    for m in re.finditer(r"\bMAXIMUM\s+(-?\d+)\b", plain, re.IGNORECASE):
+        start = m.start()
+        window = plain[max(0, start - 30):start].upper()
+        if "RECORD" in window or "NORMAL" in window or "LAST YEAR" in window:
+            continue
+        try:
+            return float(m.group(1))
+        except ValueError:
+            continue
+    return None
+
+
+def _observed_section(plain: str) -> Optional[str]:
+    """Slice the observed-temperature block out of a CLI product."""
+    # First TEMPERATURE header (with or without (F) unit annotation).
+    header = re.search(
+        r"(?im)^[ \t]*TEMPERATURE\b[^\n]*$",
+        plain,
+    )
+    if header is None:
+        return None
+    start = header.end()
+    # Earliest next-section header after the TEMPERATURE header.
+    # Compare as uppercase so the literal matching is case-insensitive.
+    tail = plain[start:]
+    tail_upper = tail.upper()
+    end = len(tail)
+    for marker in _CLI_NEXT_SECTIONS:
+        idx = tail_upper.find(marker)
+        if 0 <= idx < end:
+            end = idx
+    return tail[:end]
+
+
+def _first_observed_max_in_section(section: str) -> Optional[float]:
+    """Inside the TEMPERATURE section, find the observed MAXIMUM value."""
+    for line in section.splitlines():
+        stripped = line.strip()
+        up = stripped.upper()
+        if not up.startswith("MAXIMUM"):
+            continue
+        # Exclude qualified lines that are NOT the observed max.
+        if ("RECORD" in up
+                or "NORMAL" in up
+                or up.startswith("MAXIMUM TEMPERATURE LAST YEAR")
+                or "LAST YEAR" in up):
+            continue
+        m = re.search(r"(-?\d+)", stripped)
+        if not m:
+            continue
+        try:
+            return float(m.group(1))
+        except ValueError:
+            continue
+    return None
 
 
 def running_max(obs_today: List[Dict[str, Any]]) -> Tuple[Optional[float],
