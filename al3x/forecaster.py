@@ -638,6 +638,31 @@ class Forecaster:
 
         raw_ensemble, views = _weighted_mean(source_values, weights)
 
+        # FIX 3 — re-cap Kalman after _weighted_mean re-normalizes. When
+        # other model sources drop out, their missing weight is
+        # redistributed and Kalman's realized weight can exceed
+        # MAX_KALMAN_WEIGHT even though the pre-mean cap held. Enforce
+        # the ceiling again on the realized weights and recompute.
+        MAX_KALMAN_WEIGHT = 0.60
+        if kalman_result and "kalman" in views:
+            realized_kw = views["kalman"].weight
+            if realized_kw > MAX_KALMAN_WEIGHT + 1e-9:
+                overflow = realized_kw - MAX_KALMAN_WEIGHT
+                others = {k: v for k, v in views.items() if k != "kalman"}
+                others_total = sum(v.weight for v in others.values()) or 1.0
+                views["kalman"].weight = MAX_KALMAN_WEIGHT
+                for name, sv in others.items():
+                    sv.weight += overflow * (sv.weight / others_total)
+                raw_ensemble = sum(v.value * v.weight for v in views.values()
+                                   if v.value is not None)
+                log.debug(
+                    "Kalman post-_weighted_mean cap fired: realized %.3f → "
+                    "%.3f; sources present=%s weights=%s",
+                    realized_kw, MAX_KALMAN_WEIGHT,
+                    sorted(views.keys()),
+                    {k: round(v.weight, 3) for k, v in views.items()},
+                )
+
         contrib_vals = [v.value for v in views.values()
                         if v.value is not None and v.weight > 0]
         spread = ((max(contrib_vals) - min(contrib_vals))
