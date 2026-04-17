@@ -113,10 +113,79 @@ def _asos_trend_projection(obs_today: List[Dict[str, Any]],
 
 # ---- Regime detection for bias corrections ---------------------------------
 
+def _airport_gradient_signals(
+        knyc_obs: List[Dict[str, Any]],
+        airport_obs_by_station: Dict[str, List[Dict[str, Any]]]
+        ) -> Dict[str, Any]:
+    """UPGRADE B — compute airport-gradient regime signals.
+
+    ``uhi_signal_f``: KNYC-minus-mean(KLGA/KJFK/KEWR/KTEB) at a 5-8 AM
+      observation (sunrise). Positive = KNYC is running warmer than
+      the ring, indicating strong UHI. Threshold 3°F → uhi_strong.
+    ``sea_breeze_gradient_f``: KEWR-minus-KJFK temperature in the
+      afternoon (after 11 AM local). Positive gradient >=5°F = cool
+      maritime air has reached KJFK but not the inland Newark gauge,
+      meaning a sea breeze is actively active.
+    Both are None if we don't have enough station coverage.
+    """
+    def _latest(obs_list: List[Dict[str, Any]], hour_lo: int, hour_hi: int,
+                field: str) -> Optional[float]:
+        best: Optional[Tuple[str, float]] = None
+        for o in obs_list or []:
+            ts = o.get("observed_at")
+            if not ts:
+                continue
+            try:
+                dt = datetime.fromisoformat(ts)
+            except Exception:
+                continue
+            if not (hour_lo <= dt.hour <= hour_hi):
+                continue
+            v = o.get(field)
+            if v is None:
+                continue
+            if best is None or ts > best[0]:
+                best = (ts, float(v))
+        return best[1] if best else None
+
+    out: Dict[str, Any] = {
+        "uhi_signal_f": None, "uhi_strong": False,
+        "sea_breeze_gradient_f": None, "sea_breeze_confirmed": False,
+    }
+
+    # UHI: KNYC vs ring mean at sunrise (5-8 AM local)
+    knyc_sunrise = _latest(knyc_obs, 5, 8, "temperature_f")
+    ring = []
+    for st in ("KLGA", "KJFK", "KEWR", "KTEB"):
+        t = _latest(airport_obs_by_station.get(st, []), 5, 8, "temperature_f")
+        if t is not None:
+            ring.append(t)
+    if knyc_sunrise is not None and len(ring) >= 2:
+        ring_mean = sum(ring) / len(ring)
+        delta = knyc_sunrise - ring_mean
+        out["uhi_signal_f"] = round(delta, 2)
+        if delta > 3.0:
+            out["uhi_strong"] = True
+
+    # Sea breeze: KEWR - KJFK after 11 AM (latest obs available)
+    kewr_aft = _latest(airport_obs_by_station.get("KEWR", []), 11, 19,
+                       "temperature_f")
+    kjfk_aft = _latest(airport_obs_by_station.get("KJFK", []), 11, 19,
+                       "temperature_f")
+    if kewr_aft is not None and kjfk_aft is not None:
+        gradient = kewr_aft - kjfk_aft
+        out["sea_breeze_gradient_f"] = round(gradient, 2)
+        if gradient > 5.0:
+            out["sea_breeze_confirmed"] = True
+    return out
+
+
 def _detect_regime(hourly: List[Dict[str, Any]],
                    obs_today: Optional[List[Dict[str, Any]]] = None,
                    grid_hourly: Optional[List[Dict[str, Any]]] = None,
-                   target_date: Optional[date] = None) -> Dict[str, Any]:
+                   target_date: Optional[date] = None,
+                   airport_obs: Optional[Dict[str, List[Dict[str, Any]]]]
+                   = None) -> Dict[str, Any]:
     """Extract regime flags used by the bias-correction rules.
 
     BUG 1: inversion_hint is now populated from obs_today (morning dewpoint
@@ -339,7 +408,7 @@ def _detect_regime(hourly: List[Dict[str, Any]],
     calm_clear = (max_wind < 10 and (cloud_avg_aft or 100) <= 30
                   and (cloud_avg_morn or 100) <= 50)
 
-    return {
+    result = {
         "sea_breeze_shift": sea_breeze_shift,
         "sea_breeze_full": sea_breeze_full,
         # BUG 3 — require actual afternoon directional evidence. Don't fall
@@ -357,6 +426,18 @@ def _detect_regime(hourly: List[Dict[str, Any]],
         "cloud_avg": cloud_avg,
         "max_wind_kt": max_wind,
     }
+
+    # UPGRADE B — airport gradient signals
+    if airport_obs:
+        gradient = _airport_gradient_signals(obs_today or [], airport_obs)
+        result.update(gradient)
+    else:
+        result["uhi_signal_f"] = None
+        result["uhi_strong"] = False
+        result["sea_breeze_gradient_f"] = None
+        result["sea_breeze_confirmed"] = False
+
+    return result
 
 
 def _apply_corrections(target_date: date, regime: Dict[str, Any],
@@ -383,12 +464,27 @@ def _apply_corrections(target_date: date, regime: Dict[str, Any],
             sb_reason = "W/NW wind all day — no sea-breeze suppression"
         else:
             sb_reason = "No clear sea-breeze signal"
+    # UPGRADE B — when full sea-breeze is confirmed by the KEWR-KJFK
+    # gradient (>=5°F), scale the penalty by 1.25× (cap, gradient
+    # confirms the regime detection).
+    if regime.get("sea_breeze_full") and regime.get("sea_breeze_confirmed"):
+        sb_delta = sb_delta * 1.25
+        grad = regime.get("sea_breeze_gradient_f")
+        sb_reason += (f" [KEWR-KJFK {grad:+.1f}°F confirms sea breeze]"
+                      if grad is not None else " [airport gradient confirms]")
     corrections["sea_breeze"] = {"delta": sb_delta, "reason": sb_reason}
 
     # 2. UHI
     if regime["calm_clear"]:
         uhi = bias.get("uhi_clear_calm", cfg.BIAS_DEFAULTS.uhi_clear_calm)
         uhi_reason = "Clear, calm day — urban heat boost"
+        # UPGRADE B — if KNYC ran >3°F warmer than the airport ring at
+        # sunrise, the UHI signal is visibly active → 1.5× boost.
+        if regime.get("uhi_strong"):
+            uhi = uhi * 1.5
+            sig = regime.get("uhi_signal_f")
+            uhi_reason += (f" [KNYC {sig:+.1f}°F vs airport ring at sunrise]"
+                           if sig is not None else " [strong UHI signal]")
     elif regime["sustained_windy"]:
         uhi = 0.0
         uhi_reason = "Windy — atmosphere well mixed"
@@ -528,6 +624,9 @@ class Forecaster:
         # UPGRADE A — GEFS ensemble spread (native forecast sigma)
         gefs_task    = asyncio.create_task(
             self.sources.gfs_ensemble_spread(target_date))
+        # UPGRADE B — KLGA/KJFK/KEWR/KTEB airport ring (regime confirmation)
+        airport_task = asyncio.create_task(
+            self.sources.airport_observations())
 
         # Await ASOS first so we can pass obs to the diurnal fitter
         obs = await asos_task
@@ -551,12 +650,26 @@ class Forecaster:
             self.sources.ecmwf(target_date, also_obs=obs_today))
 
         # Await all remaining tasks concurrently
-        nws_r, nbm_r, grid_r, hrrr_r, ecmwf_r, gfs_r, gefs_r = (
+        (nws_r, nbm_r, grid_r, hrrr_r, ecmwf_r, gfs_r, gefs_r,
+         airport_obs_by_station) = (
             await asyncio.gather(
                 hourly_task, nbm_task, grid_task, hrrr_task, ecmwf_task,
-                gfs_task, gefs_task,
+                gfs_task, gefs_task, airport_task,
             )
         )
+
+        # UPGRADE B — persist new airport observations to DB for history
+        today_str_all = target_date.isoformat()
+        if airport_obs_by_station:
+            for station, station_obs in airport_obs_by_station.items():
+                for o in station_obs:
+                    if o["observed_at"][:10] != today_str_all:
+                        continue
+                    try:
+                        self.storage.save_airport_observation(station, o)
+                    except Exception as e:  # noqa: BLE001
+                        log.info("airport obs save failed (%s): %s",
+                                 station, e)
 
         running_max_f, running_max_ts = running_max(obs_today)
 
@@ -704,12 +817,14 @@ class Forecaster:
             raw_ensemble = float(bma_result["bma_forecast_f"])
 
         # Corrections — regime now gets obs_today (Bug 1) + grid data (Gap 1)
+        # + UPGRADE B airport ring obs (gradient-based regime confirmation)
         bias = self._live_bias()
         regime = _detect_regime(
             nws_r.meta.get("hourly", []),
             obs_today=obs_today,
             grid_hourly=grid_r.meta.get("hourly_grid") if grid_r else None,
             target_date=target_date,
+            airport_obs=airport_obs_by_station,
         )
         total_delta, corrections = _apply_corrections(
             target_date, regime, spread, bias

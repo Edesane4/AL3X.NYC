@@ -200,7 +200,12 @@ class DataSources:
         feed for the same ASOS station and doesn't require parsing IEM's
         less-stable schema.
         """
-        url = (f"https://api.weather.gov/stations/{cfg.STATION_ID}"
+        return await self._station_observations(cfg.STATION_ID)
+
+    async def _station_observations(
+            self, station_id: str) -> List[Dict[str, Any]]:
+        """Fetch METAR observations for a single NWS station."""
+        url = (f"https://api.weather.gov/stations/{station_id}"
                "/observations?limit=72")
         try:
             r = await self._client.get(url)
@@ -248,8 +253,33 @@ class DataSources:
             obs.sort(key=lambda o: o["observed_at"])
             return obs
         except Exception as e:  # noqa: BLE001
-            log.warning("asos fetch failed: %s", e)
+            log.warning("asos fetch failed for %s: %s", station_id, e)
             return []
+
+    # ---- UPGRADE B: multi-airport cross-validation ---------------------
+    async def airport_observations(
+            self, stations: Optional[List[str]] = None
+            ) -> Dict[str, List[Dict[str, Any]]]:
+        """Fetch ASOS observations from the NYC-metro airport ring.
+
+        Returns {station_id: [obs]} keyed by station. Fetches run in
+        parallel with per-station error isolation — one failing station
+        doesn't poison the rest. Stations default to KLGA/KJFK/KEWR/KTEB
+        (not KNYC; that's ``asos_observations`` and goes to its own
+        table for backward compatibility).
+        """
+        import asyncio
+        stations = stations or ["KLGA", "KJFK", "KEWR", "KTEB"]
+        tasks = [self._station_observations(s) for s in stations]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for st, res in zip(stations, results):
+            if isinstance(res, Exception):
+                log.info("airport obs %s failed: %s", st, res)
+                out[st] = []
+            else:
+                out[st] = res
+        return out
 
     # ---- GFS-MOS / NAM-MOS (via IEM) ------------------------------------
     #

@@ -247,6 +247,25 @@ CREATE TABLE IF NOT EXISTS night_before_runs (
     run_count INTEGER NOT NULL DEFAULT 0,
     last_run_at TEXT NOT NULL
 );
+
+-- UPGRADE B: per-station airport observations (KLGA/KJFK/KEWR/KTEB)
+-- kept in their own table so regime detection can compute
+-- inter-station gradients (sea breeze early warning, UHI magnitude)
+-- without polluting the KNYC observations table used everywhere else.
+CREATE TABLE IF NOT EXISTS airport_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    station_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    temperature_f REAL,
+    wind_dir_deg REAL,
+    wind_speed_kt REAL,
+    dewpoint_f REAL,
+    sky_cover_pct REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_airport_obs_station_time
+    ON airport_observations(station_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_airport_obs_station
+    ON airport_observations(station_id);
 """
 
 
@@ -366,6 +385,30 @@ class Storage:
                     "target_date TEXT PRIMARY KEY, "
                     "run_count INTEGER NOT NULL DEFAULT 0, "
                     "last_run_at TEXT NOT NULL)"
+                )
+            except sqlite3.OperationalError:
+                pass
+
+            # UPGRADE B — airport_observations table for multi-airport
+            # cross-validation. Safe to re-run on existing DBs.
+            try:
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS airport_observations ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "station_id TEXT NOT NULL, "
+                    "observed_at TEXT NOT NULL, "
+                    "temperature_f REAL, wind_dir_deg REAL, "
+                    "wind_speed_kt REAL, dewpoint_f REAL, "
+                    "sky_cover_pct REAL)"
+                )
+                c.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "ux_airport_obs_station_time "
+                    "ON airport_observations(station_id, observed_at)"
+                )
+                c.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_airport_obs_station "
+                    "ON airport_observations(station_id)"
                 )
             except sqlite3.OperationalError:
                 pass
@@ -1147,6 +1190,50 @@ class Storage:
                 (f"-{days} days",),
             )
             return int(cur.rowcount or 0)
+
+    # -- UPGRADE B: airport observations ---------------------------------
+    def save_airport_observation(self, station_id: str,
+                                 row: Dict[str, Any]) -> None:
+        with self._conn() as c:
+            c.execute(
+                "INSERT OR IGNORE INTO airport_observations "
+                "(station_id, observed_at, temperature_f, wind_dir_deg, "
+                " wind_speed_kt, dewpoint_f, sky_cover_pct) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    station_id,
+                    row["observed_at"],
+                    row.get("temperature_f"),
+                    row.get("wind_dir_deg"),
+                    row.get("wind_speed_kt"),
+                    row.get("dewpoint_f"),
+                    row.get("sky_cover_pct"),
+                ),
+            )
+
+    def airport_observations_today(self, date_str: str,
+                                    station_id: Optional[str] = None
+                                    ) -> List[Dict]:
+        """Return airport observations for the given local date.
+
+        If station_id is None, returns all stations (caller groups them).
+        """
+        with self._conn() as c:
+            if station_id:
+                rows = c.execute(
+                    "SELECT * FROM airport_observations "
+                    "WHERE substr(observed_at,1,10)=? AND station_id=? "
+                    "ORDER BY observed_at ASC",
+                    (date_str, station_id),
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM airport_observations "
+                    "WHERE substr(observed_at,1,10)=? "
+                    "ORDER BY observed_at ASC",
+                    (date_str,),
+                ).fetchall()
+            return [dict(r) for r in rows]
 
     # -- FIX 6: score lookup by date+mode (not by recency) ---------------
     def score_for_date_and_mode(self, target_date: str,
