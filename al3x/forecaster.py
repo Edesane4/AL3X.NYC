@@ -778,7 +778,21 @@ class Forecaster:
                 ai_result = await self.ai_calibrator.calibrate(
                     temp_fc, obs_today, recent_scores
                 )
-                final = final + ai_result.get("delta_f", 0.0)
+                # FIX 4 — weight the delta by the AI's own confidence.
+                # Previously the raw delta was added at full strength
+                # regardless of confidence, which amplified noise on
+                # low-certainty calls. Soft floor at 0.3: below that the
+                # AI is too uncertain to move the forecast.
+                ai_delta_raw = float(ai_result.get("delta_f", 0.0) or 0.0)
+                ai_confidence = float(ai_result.get("confidence", 0.0) or 0.0)
+                if ai_confidence < 0.3:
+                    ai_delta_applied = 0.0
+                else:
+                    ai_delta_applied = ai_delta_raw * ai_confidence
+                ai_result["delta_f_raw"] = round(ai_delta_raw, 2)
+                ai_result["delta_f_applied"] = round(ai_delta_applied, 2)
+                ai_result["confidence"] = round(ai_confidence, 3)
+                final = final + ai_delta_applied
             except Exception as e:  # noqa: BLE001
                 log.warning("AI calibration failed, continuing without: %s", e)
 
