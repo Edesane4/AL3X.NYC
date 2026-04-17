@@ -97,12 +97,21 @@ class Learning:
 
     def _attribute_corrections(self, fc: Dict[str, Any], cli: float,
                                 regime: str) -> None:
-        """For each nonzero correction that was applied to this forecast,
-        record whether applying it reduced |error| or increased it.
+        """For each correction that had an effect (applied OR suppressed),
+        record whether it moved the forecast toward or away from truth.
 
-        Logic: final = raw_ensemble + sum(correction deltas) + (ai_delta).
-        For a given correction delta d, the counterfactual "without it"
-        final would be final - d. We compare |cli - final| vs |cli - (final - d)|.
+        Applied case (delta != 0): counterfactual is final - delta.
+          * |cli - final| > |cli - counterfactual| → correction hurt.
+          * |cli - final| < |cli - counterfactual| → correction helped.
+
+        Suppressed case (FIX 2 — delta == 0 but suppressed_delta present):
+        the *suppression decision* itself is what we score. Counterfactual
+        is final + suppressed_delta — the value we would have had if we
+        had applied the correction anyway.
+          * was_helpful = -1 → applying would have helped, so suppression HURT.
+          * was_helpful = +1 → applying would have hurt, so suppression was RIGHT.
+        Suppressed rows are tagged with was_suppressed=1 so retune logic
+        can filter or weight them separately.
         """
         final = fc.get("final_f")
         if final is None:
@@ -111,23 +120,50 @@ class Learning:
         corrections = fc.get("corrections", {}) or {}
         for name, payload in corrections.items():
             d = float(payload.get("delta") or 0.0)
-            if abs(d) < 1e-6:
+
+            if abs(d) >= 1e-6:
+                # Standard applied-correction attribution
+                err_without = cli - (final - d)
+                if abs(err_without) > abs(err) + 1e-6:
+                    helpful = 1
+                elif abs(err_without) < abs(err) - 1e-6:
+                    helpful = -1
+                else:
+                    helpful = 0
+                self.storage.save_attribution({
+                    "target_date": fc["target_date"],
+                    "correction_name": name,
+                    "delta_applied_f": d,
+                    "regime_label": regime,
+                    "error_f": err,
+                    "was_helpful": helpful,
+                    "forecast_id": fc.get("id"),
+                    "was_suppressed": 0,
+                })
                 continue
-            err_without = cli - (final - d)
-            if abs(err_without) > abs(err) + 1e-6:
-                helpful = 1
-            elif abs(err_without) < abs(err) - 1e-6:
+
+            # FIX 2 — suppressed correction: score the suppression decision
+            sd = float(payload.get("suppressed_delta") or 0.0)
+            if not payload.get("suppressed") or abs(sd) < 1e-6:
+                continue
+            err_if_applied = cli - (final + sd)
+            if abs(err_if_applied) < abs(err) - 1e-6:
+                # Applying would have helped → suppression hurt us.
                 helpful = -1
+            elif abs(err_if_applied) > abs(err) + 1e-6:
+                # Applying would have hurt → suppression saved us.
+                helpful = 1
             else:
                 helpful = 0
             self.storage.save_attribution({
                 "target_date": fc["target_date"],
                 "correction_name": name,
-                "delta_applied_f": d,
+                "delta_applied_f": sd,  # record what would have been applied
                 "regime_label": regime,
                 "error_f": err,
                 "was_helpful": helpful,
                 "forecast_id": fc.get("id"),
+                "was_suppressed": 1,
             })
 
     # ---- Gap 2 — inverse-MAE weight retune across all 4 weight sets -----
@@ -418,14 +454,32 @@ class Learning:
 
     # ---- Superior 3 — correction attribution aggregation ----------------
     def attribution_stats(self, days: int = 30) -> Dict[str, Dict[str, Any]]:
+        """Aggregate attribution rows into per-correction stats.
+
+        FIX 2 — applied rows and suppressed rows are accumulated
+        separately. ``suppression_track_record`` is the fraction of
+        suppressed days where was_helpful == 1 (i.e. suppression was the
+        right call). Tuning rule: >70% indicates a good spread
+        threshold, <40% indicates the threshold is wrong.
+        """
         rows = self.storage.attribution_rows(days=days)
         agg: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
             "times_applied": 0, "times_helpful": 0, "times_harmful": 0,
             "sum_delta": 0.0, "sum_error": 0.0,
+            "times_suppressed": 0, "suppression_correct": 0,
+            "suppression_wrong": 0,
         })
         for r in rows:
             name = r["correction_name"]
             a = agg[name]
+            is_sup = bool(r.get("was_suppressed"))
+            if is_sup:
+                a["times_suppressed"] += 1
+                if r["was_helpful"] == 1:
+                    a["suppression_correct"] += 1
+                elif r["was_helpful"] == -1:
+                    a["suppression_wrong"] += 1
+                continue
             a["times_applied"] += 1
             a["sum_delta"] += r["delta_applied_f"]
             a["sum_error"] += r["error_f"]
@@ -437,6 +491,18 @@ class Learning:
         out: Dict[str, Dict[str, Any]] = {}
         for name, a in agg.items():
             n = a["times_applied"]
+            ns = a["times_suppressed"]
+            correct = a["suppression_correct"]
+            # Fraction of suppressed days where suppression was correct.
+            # None when sample < 3, else rounded to 3 dp.
+            track = (round(correct / ns, 3)
+                     if ns >= 3 else None)
+            if track is not None:
+                if track < 0.40:
+                    log.warning(
+                        "Suppression track record LOW for %s: %.0f%% correct "
+                        "across %d suppressed days — spread threshold may be "
+                        "wrong", name, track * 100, ns)
             out[name] = {
                 "times_applied": n,
                 "times_helpful": a["times_helpful"],
@@ -445,6 +511,10 @@ class Learning:
                 "mean_error_when_active": round(a["sum_error"] / n, 2) if n else 0.0,
                 "harmful_ratio": (round(a["times_harmful"] / n, 3)
                                    if n else 0.0),
+                "times_suppressed": ns,
+                "suppression_correct": correct,
+                "suppression_wrong": a["suppression_wrong"],
+                "suppression_track_record": track,
             }
         return out
 
@@ -460,6 +530,20 @@ class Learning:
                "samples": {k: len(v) for k, v in by_mode.items()}}
         out["target_night_before_mae"] = cfg.TARGET_NIGHT_BEFORE_MAE
         out["target_intraday_mae"] = cfg.TARGET_INTRADAY_MAE
+        # FIX 2 — surface per-correction suppression track record
+        try:
+            stats = self.attribution_stats(days=30)
+            out["suppression_track_record"] = {
+                name: {
+                    "times_suppressed": s["times_suppressed"],
+                    "track_record": s["suppression_track_record"],
+                }
+                for name, s in stats.items()
+                if s.get("times_suppressed", 0) > 0
+            }
+        except Exception as e:  # noqa: BLE001
+            log.info("suppression track record unavailable: %s", e)
+            out["suppression_track_record"] = {}
         return out
 
 

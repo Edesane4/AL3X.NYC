@@ -442,8 +442,15 @@ def _apply_corrections(target_date: date, regime: Dict[str, Any],
             "reason": f"High model spread ({spread:.1f}°F) — "
                       "no additive trust; widened uncertainty",
         }
-        # When spread is high, zero out other corrections (less reliable)
+        # FIX 2 — when spread is high, suppress other corrections but
+        # preserve the would-have-been-applied delta on each payload so
+        # the attribution ledger can score whether suppression was the
+        # right call. Before this, the learning loop silently dropped
+        # every high-spread day (no attribution rows written at all),
+        # biasing retunes toward calm/predictable days.
         for k in ("sea_breeze", "uhi", "cloud_timing", "precip", "inversion"):
+            corrections[k]["suppressed_delta"] = corrections[k]["delta"]
+            corrections[k]["suppressed"] = True
             corrections[k]["delta"] = 0.0
             corrections[k]["reason"] += " (suppressed: high spread)"
     else:

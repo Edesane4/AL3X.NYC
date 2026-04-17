@@ -119,7 +119,8 @@ CREATE TABLE IF NOT EXISTS correction_attribution (
     error_f REAL NOT NULL,
     was_helpful INTEGER NOT NULL,        -- 1 helped, -1 hurt, 0 neutral
     forecast_id INTEGER,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    was_suppressed INTEGER NOT NULL DEFAULT 0  -- FIX 2: high-spread suppress
 );
 CREATE INDEX IF NOT EXISTS idx_attr_date ON correction_attribution(target_date);
 CREATE INDEX IF NOT EXISTS idx_attr_name ON correction_attribution(correction_name);
@@ -335,6 +336,18 @@ class Storage:
                             (new_key, float(r["value"]), _utc_now_iso()),
                         )
             except sqlite3.OperationalError:
+                pass
+
+            # FIX 2 — add was_suppressed column to correction_attribution
+            # for existing DBs. ALTER is idempotent via try/except.
+            try:
+                c.execute(
+                    "ALTER TABLE correction_attribution "
+                    "ADD COLUMN was_suppressed INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                # Either: (a) column already exists, (b) table doesn't exist
+                # yet. Either way, _init_schema covers fresh DBs.
                 pass
 
             # BUGS 1+3 — dedupe scores + enforce UNIQUE(forecast_id, mode)
@@ -610,8 +623,9 @@ class Storage:
             c.execute(
                 """INSERT INTO correction_attribution
                    (target_date, correction_name, delta_applied_f, regime_label,
-                    error_f, was_helpful, forecast_id, created_at)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                    error_f, was_helpful, forecast_id, created_at,
+                    was_suppressed)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
                     row["target_date"],
                     row["correction_name"],
@@ -621,6 +635,7 @@ class Storage:
                     int(row["was_helpful"]),
                     row.get("forecast_id"),
                     _utc_now_iso(),
+                    int(row.get("was_suppressed") or 0),
                 ),
             )
 
