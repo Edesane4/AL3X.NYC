@@ -518,6 +518,28 @@ class Learning:
             }
         return out
 
+    # ---- FIX 6: yesterday error lookup (for Part 2 kalshi engine) -------
+    def yesterday_error(self) -> Optional[float]:
+        """Return |error| for the most recent score on the calendar day
+        before today (Eastern). Prefers intraday over night_before.
+
+        The Part 2 Kalshi engine's CB6 ("shrink size on >4°F prior-day
+        error") needs yesterday-specific, not most-recent-in-last-2-days.
+        If today's CLI verified before this runs (common after 6 PM
+        Eastern), the naive "first score from recent_scores(days=2)"
+        returns today's near-zero error (running-max floor pinned it),
+        and CB6 never fires.
+        """
+        yesterday = (datetime.now(cfg.EASTERN).date()
+                     - timedelta(days=1)).isoformat()
+        row = self.storage.score_for_date_and_mode(yesterday, "intraday")
+        if row:
+            return float(row["abs_error_f"])
+        row = self.storage.score_for_date_and_mode(yesterday, "night_before")
+        if row:
+            return float(row["abs_error_f"])
+        return None
+
     # ---- stats endpoints ------------------------------------------------
     def headline_stats(self) -> Dict[str, Any]:
         scores = self.storage.recent_scores(days=30)
