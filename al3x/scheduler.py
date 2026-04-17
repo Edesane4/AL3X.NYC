@@ -60,8 +60,9 @@ class AgentScheduler:
                                       ai_calibrator=ai_calibrator)
         self.learning = Learning(storage)
         self.scheduler = AsyncIOScheduler(timezone=str(cfg.EASTERN))
-        # BUG 6 — up to 3 night-before runs per evening, tracked by date.
-        self._night_before_runs: Dict[str, int] = {}
+        # FIX 5 — run counts now live in the DB (see
+        # storage.night_before_runs). The in-memory dict was lost on
+        # every restart, producing phantom repeat runs.
         self._cli_verified_for: set[str] = set()
         # BUGS 1+3 — survive restarts without re-scoring already-verified
         # days. Seed the in-memory guard from the DB at boot.
@@ -320,12 +321,9 @@ class AgentScheduler:
         now = datetime.now(cfg.EASTERN)
         tomorrow = (now + timedelta(days=1)).date()
         key = tomorrow.isoformat()
-        # BUG 7 — prune entries older than 2 days so this dict never grows
-        cutoff = (now - timedelta(days=2)).date().isoformat()
-        self._night_before_runs = {
-            k: v for k, v in self._night_before_runs.items() if k >= cutoff
-        }
-        runs_done = self._night_before_runs.get(key, 0)
+        # FIX 5 — read run count from DB (not in-memory), so restarts
+        # between 6-11 PM don't re-emit night-before runs.
+        runs_done = self.storage.get_night_before_run_count(key)
 
         if not forced:
             if runs_done >= 3:
@@ -347,13 +345,12 @@ class AgentScheduler:
                 if not cli_ready:
                     return
 
-        run_number = runs_done + 1
+        run_number = self.storage.increment_night_before_run_count(key)
         fc = await self.forecaster.produce("night_before", tomorrow)
         fc["extras"] = dict(fc.get("extras", {}))
         fc["extras"]["night_before_run"] = run_number
         fid = self.storage.save_forecast(fc)
         fc["id"] = fid
-        self._night_before_runs[key] = run_number
         # Persist QRF prediction for night-before too
         nb_qrf = (fc.get("extras") or {}).get("qrf")
         if nb_qrf is not None:
@@ -471,6 +468,14 @@ class AgentScheduler:
     async def retune_weights(self) -> None:
         res = self.learning.retune_weights()
         log.info("Weekly weight retune: %s", res)
+        # FIX 5 — piggy-back on the weekly cron to prune old
+        # night_before_runs rows (keep 7 days).
+        try:
+            pruned = self.storage.purge_old_night_before_runs(days=7)
+            if pruned:
+                log.info("Pruned %d old night_before_runs rows", pruned)
+        except Exception as e:  # noqa: BLE001
+            log.info("night_before_runs prune failed: %s", e)
         if res.get("ok") and self.notifier.configured:
             self.notifier.enqueue(
                 f"⚖️ <b>Weights retuned (7-day window)</b>\n"

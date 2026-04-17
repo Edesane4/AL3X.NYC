@@ -238,6 +238,15 @@ CREATE TABLE IF NOT EXISTS kalshi_bankroll (
     win_count INTEGER NOT NULL DEFAULT 0,
     paper_mode INTEGER NOT NULL DEFAULT 1
 );
+
+-- FIX 5: persist night-before run counts so restarts between 6-11 PM
+-- can't re-emit extra runs (previously the in-memory dict reset and
+-- the dashboard would show several phantom night-before forecasts).
+CREATE TABLE IF NOT EXISTS night_before_runs (
+    target_date TEXT PRIMARY KEY,
+    run_count INTEGER NOT NULL DEFAULT 0,
+    last_run_at TEXT NOT NULL
+);
 """
 
 
@@ -348,6 +357,17 @@ class Storage:
             except sqlite3.OperationalError:
                 # Either: (a) column already exists, (b) table doesn't exist
                 # yet. Either way, _init_schema covers fresh DBs.
+                pass
+
+            # FIX 5 — night_before_runs table for restart-resilient run count
+            try:
+                c.execute(
+                    "CREATE TABLE IF NOT EXISTS night_before_runs ("
+                    "target_date TEXT PRIMARY KEY, "
+                    "run_count INTEGER NOT NULL DEFAULT 0, "
+                    "last_run_at TEXT NOT NULL)"
+                )
+            except sqlite3.OperationalError:
                 pass
 
             # BUGS 1+3 — dedupe scores + enforce UNIQUE(forecast_id, mode)
@@ -1093,6 +1113,59 @@ class Storage:
                 (f"-{days} days",),
             )
             return cur.rowcount
+
+    # -- FIX 5: night-before run counts (restart-resilient) --------------
+    def get_night_before_run_count(self, target_date: str) -> int:
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT run_count FROM night_before_runs WHERE target_date=?",
+                (target_date,),
+            ).fetchone()
+            return int(r["run_count"]) if r else 0
+
+    def increment_night_before_run_count(self, target_date: str) -> int:
+        """Atomically bump and return the new run count for target_date."""
+        with self._conn() as c:
+            c.execute(
+                "INSERT INTO night_before_runs "
+                "(target_date, run_count, last_run_at) VALUES (?, 1, ?) "
+                "ON CONFLICT(target_date) DO UPDATE SET "
+                "run_count = run_count + 1, last_run_at = excluded.last_run_at",
+                (target_date, _utc_now_iso()),
+            )
+            r = c.execute(
+                "SELECT run_count FROM night_before_runs WHERE target_date=?",
+                (target_date,),
+            ).fetchone()
+            return int(r["run_count"])
+
+    def purge_old_night_before_runs(self, days: int = 7) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                "DELETE FROM night_before_runs "
+                "WHERE target_date < date('now', ?)",
+                (f"-{days} days",),
+            )
+            return int(cur.rowcount or 0)
+
+    # -- FIX 6: score lookup by date+mode (not by recency) ---------------
+    def score_for_date_and_mode(self, target_date: str,
+                                 mode: str) -> Optional[Dict]:
+        """Return the most recent score for the exact target_date and mode.
+
+        The older ``recent_scores(days=2)`` + "pick the first intraday"
+        approach returned today's score after CLI verified before close,
+        yielding a near-zero error because the running-max floor had
+        pinned the forecast. This queries by date explicitly.
+        """
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT * FROM scores "
+                "WHERE target_date=? AND mode=? "
+                "ORDER BY id DESC LIMIT 1",
+                (target_date, mode),
+            ).fetchone()
+            return dict(r) if r else None
 
 
 def _forecast_row(r: Optional[sqlite3.Row]) -> Optional[Dict]:
