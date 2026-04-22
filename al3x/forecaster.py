@@ -207,6 +207,7 @@ def _detect_regime(hourly: List[Dict[str, Any]],
     if not hourly and not grid_hourly:
         # Inversion can still be detected from ASOS obs alone.
         iv = False
+        iv_strength = "weak"
         if obs_today:
             for o in obs_today:
                 ts = o.get("observed_at")
@@ -216,21 +217,36 @@ def _detect_regime(hourly: List[Dict[str, Any]],
                     dt = datetime.fromisoformat(ts)
                 except Exception:
                     continue
-                if dt.hour >= 8:
-                    continue
                 t_f = o.get("temperature_f")
                 d_f = o.get("dewpoint_f")
                 if t_f is None or d_f is None:
                     continue
-                if abs(t_f - d_f) <= 5.0:
+                if 5 <= dt.hour <= 8:
+                    sky = o.get("sky_cover_pct")
+                    wind = o.get("wind_speed_kt")
+                    if ((t_f - d_f) <= 3.0
+                            and (sky is None or sky <= 30)
+                            and (wind is None or wind <= 5)):
+                        iv = True
+                        iv_strength = "strong"
+                        break
+                if dt.hour < 8 and abs(t_f - d_f) <= 5.0:
                     iv = True
-                    break
-        return {"sea_breeze_shift": False, "sea_breeze_full": False,
+        airport_sig = (_airport_gradient_signals(obs_today or [],
+                                                 airport_obs or {})
+                       if (airport_obs) else
+                       {"uhi_signal_f": None, "uhi_strong": False,
+                        "sea_breeze_gradient_f": None,
+                        "sea_breeze_confirmed": False})
+        base = {"sea_breeze_shift": False, "sea_breeze_full": False,
                 "wind_nw_all_day": False, "cloud_morning_increase": False,
                 "cloud_afternoon_clearing": False, "any_precip_peak": False,
                 "precip_heavy": False, "inversion_hint": iv,
+                "inversion_strength": iv_strength,
                 "calm_clear": False, "sustained_windy": False,
                 "cloud_avg": None, "max_wind_kt": None}
+        base.update(airport_sig)
+        return base
 
     cloud_before_noon = []
     cloud_after_noon = []
@@ -320,10 +336,15 @@ def _detect_regime(hourly: List[Dict[str, Any]],
         cloud_avg = sum(all_cloud) / len(all_cloud)
 
     # BUG 1 — detect inversion/fog from this morning's ASOS observations.
-    # The directive: "overnight low within 5°F of dewpoint at 6 AM" implies
-    # radiation fog or trapped stable layer. Check any observation between
-    # midnight and 8 AM local.
+    # UPGRADE C — classify STRONG inversion (clear + calm + ≤3°F depression,
+    # textbook radiation inversion signature) vs WEAK (just the moisture
+    # cue). The strong classification triggers a 1.5× cap in
+    # _apply_corrections. Scan observations between midnight and 8 AM;
+    # only take the 5-8 AM window seriously for the strong classification
+    # since that's the sunrise inversion signal.
+    inversion_strength = "weak"
     if obs_today:
+        strong_found = False
         for o in obs_today:
             ts = o.get("observed_at")
             if not ts:
@@ -332,15 +353,26 @@ def _detect_regime(hourly: List[Dict[str, Any]],
                 dt = datetime.fromisoformat(ts)
             except Exception:
                 continue
-            if dt.hour >= 8:
-                continue
             t_f = o.get("temperature_f")
             d_f = o.get("dewpoint_f")
             if t_f is None or d_f is None:
                 continue
-            if abs(t_f - d_f) <= 5.0:
+
+            if 5 <= dt.hour <= 8:
+                depression = t_f - d_f
+                sky = o.get("sky_cover_pct")
+                wind = o.get("wind_speed_kt")
+                if (depression <= 3.0
+                        and (sky is None or sky <= 30)
+                        and (wind is None or wind <= 5)):
+                    inversion_hint = True
+                    inversion_strength = "strong"
+                    strong_found = True
+                    break
+
+            # Weak cue: any morning observation with moisture-capped T-Td
+            if dt.hour < 8 and abs(t_f - d_f) <= 5.0 and not strong_found:
                 inversion_hint = True
-                break
 
     # GAP 1 — if the quantitative NWS grid data is available, override the
     # string-parsed sky/precip/wind values with real numbers.
@@ -421,6 +453,10 @@ def _detect_regime(hourly: List[Dict[str, Any]],
         "any_precip_peak": any_precip_peak,
         "precip_heavy": precip_heavy,
         "inversion_hint": inversion_hint,
+        # UPGRADE C — "strong" = textbook radiation inversion
+        # (6 AM depression ≤3°F AND clear AND calm); "weak" = just
+        # the moisture cue from the legacy BUG 1 heuristic.
+        "inversion_strength": inversion_strength,
         "calm_clear": calm_clear,
         "sustained_windy": sustained_windy,
         "cloud_avg": cloud_avg,
@@ -520,12 +556,20 @@ def _apply_corrections(target_date: date, regime: Dict[str, Any],
     corrections["precip"] = {"delta": pd_, "reason": pd_reason}
 
     # 5. Inversion / fog (Oct–Apr)
+    # UPGRADE C — "strong" inversion (6 AM dewpoint depression ≤3°F AND
+    # clear AND calm) triggers a 1.5× cap. Weak inversion (moisture cue
+    # only) uses the base bias.
     if month >= 10 or month <= 4:
-        inv = bias.get("inversion_winter",
-                       cfg.BIAS_DEFAULTS.inversion_winter) \
-            if regime.get("inversion_hint") else 0.0
-        inv_reason = ("Morning inversion / fog cap" if inv != 0
-                      else "No inversion cue detected")
+        if regime.get("inversion_hint"):
+            base_inv = bias.get("inversion_winter",
+                                cfg.BIAS_DEFAULTS.inversion_winter)
+            inv_strength = regime.get("inversion_strength", "weak")
+            inv = base_inv * (1.5 if inv_strength == "strong" else 1.0)
+            inv_reason = (f"{inv_strength.title()} morning inversion "
+                          "/ fog cap")
+        else:
+            inv = 0.0
+            inv_reason = "No inversion cue detected"
     else:
         inv = 0.0
         inv_reason = "Outside inversion season"
