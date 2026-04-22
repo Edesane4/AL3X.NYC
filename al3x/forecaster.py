@@ -600,6 +600,31 @@ def _apply_corrections(target_date: date, regime: Dict[str, Any],
         }
 
     total = sum(c["delta"] for c in corrections.values())
+
+    # FIX 1 — cap total correction magnitude at ±3°F. On regime-shift days
+    # (e.g. April 20-21 post-frontal cool-down) corrections empirically
+    # stacked to ±6°F, which is a 1-in-30-year adjustment to apply
+    # routinely. Scale each component proportionally when the cap fires,
+    # but leave ``suppressed_delta`` alone — that field records the
+    # counterfactual for attribution.
+    CAP = 3.0
+    if abs(total) > CAP:
+        pre_cap_total = total
+        scale = CAP / abs(total)
+        for name, c in corrections.items():
+            if name == "spread_penalty":
+                continue
+            c["delta"] = c["delta"] * scale
+        total = sum(c["delta"] for c in corrections.values())
+        log.warning(
+            "Correction cap fired: pre-cap=%+.2f°F scale=%.3f post-cap=%+.2f°F",
+            pre_cap_total, scale, total,
+        )
+        corrections["_meta"] = {
+            "cap_fired": True,
+            "pre_cap_total": pre_cap_total,
+            "scale": scale,
+        }
     return total, corrections
 
 
@@ -1022,6 +1047,13 @@ class Forecaster:
             if mode == "intraday" and lead_hours <= 3:
                 uncertainty = max(0.5, uncertainty - 1.0)
 
+        # FIX 1 — when the correction cap fires, widen stated sigma by 1.5×
+        # so the interval honestly reflects that we hit a hard ceiling.
+        cap_meta = corrections.get("_meta") or {}
+        cap_fired = bool(cap_meta.get("cap_fired"))
+        if cap_fired:
+            uncertainty = max(uncertainty, uncertainty * 1.5)
+
         # UPGRADE D — persistence sanity check. If forecast diverges
         # from yesterday's CLI truth by >10°F with no significant regime
         # change, log a warning, stash extras.persistence_warning = True,
@@ -1123,6 +1155,8 @@ class Forecaster:
                 "p90": gefs_r.meta.get("p90"),
                 "n_members": gefs_r.meta.get("n_members"),
             } if gefs_r and gefs_r.value is not None else None),
+            # FIX 1 — correction cap fired on this cycle (±3°F ceiling).
+            "cap_fired": cap_fired,
             # UPGRADE D — informational flag if |forecast - yesterday| >10°F
             # with no regime change. Never auto-corrects the forecast.
             "persistence_warning": persistence_warning,
