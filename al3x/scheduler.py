@@ -183,21 +183,60 @@ class AgentScheduler:
     def detect_regime_shift(self, current_regime: Dict[str, Any],
                              current_spread: Optional[float],
                              target_date: str) -> List[str]:
+        """FIX 2 — tightened thresholds + rate limit.
+
+        Evidence: 41 shifts in 8 days (5.1/day avg; 13 on one day). 51%
+        were ``spread`` shifts with empty prev/new_state — noise. Each
+        firing triggers an adaptive weight reset at blend_alpha=0.50,
+        thrashing learned weights and correlating with the degraded
+        3-12h lead MAE. Changes:
+          * spread threshold tightened from >3.0°F to >5.0°F
+          * skip a candidate shift whose storage-side prev_state and
+            new_state would both be empty strings (the noise pattern)
+          * rate-limit at 3 shifts/day (skip further detection entirely)
+        """
+        try:
+            already = self.storage.count_regime_shifts_for_date(target_date)
+        except Exception:  # noqa: BLE001
+            already = 0
+        if already >= 3:
+            log.info("Regime-shift rate limit: %d shifts already recorded "
+                     "for %s; skipping detection", already, target_date)
+            return []
+
+        # Mirror intraday_cycle's key_map so we can pre-check whether
+        # storage would persist empty prev/new_state strings.
+        key_map = {
+            "precip_onset": "any_precip_peak",
+            "sea_breeze": "sea_breeze_shift",
+            "wind": "sustained_windy",
+        }
+
+        def _states_empty(stype: str) -> bool:
+            ck = key_map.get(stype, stype)
+            prev_s = str((self._last_regime or {}).get(ck, ""))
+            new_s = str(current_regime.get(ck, ""))
+            return not prev_s and not new_s
+
         shift_flags: List[str] = []
         prev = self._last_regime
         if prev is not None:
             if (prev.get("sea_breeze_shift")
                     != current_regime.get("sea_breeze_shift")):
-                shift_flags.append("sea_breeze")
+                if not _states_empty("sea_breeze"):
+                    shift_flags.append("sea_breeze")
             if (not prev.get("any_precip_peak")
                     and current_regime.get("any_precip_peak")):
-                shift_flags.append("precip_onset")
+                if not _states_empty("precip_onset"):
+                    shift_flags.append("precip_onset")
             if (prev.get("sustained_windy")
                     != current_regime.get("sustained_windy")):
-                shift_flags.append("wind")
+                if not _states_empty("wind"):
+                    shift_flags.append("wind")
             if (self._last_spread is not None and current_spread is not None
-                    and abs(current_spread - self._last_spread) > 3.0):
-                shift_flags.append("spread")
+                    and abs(current_spread - self._last_spread) > 5.0):
+                if not _states_empty("spread"):
+                    shift_flags.append("spread")
         return shift_flags
 
     async def _adaptive_weight_reset(self, shift_flags: List[str]) -> None:

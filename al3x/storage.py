@@ -860,6 +860,19 @@ class Storage:
             )
             return cur.lastrowid
 
+    def count_regime_shifts_for_date(self, target_date: str) -> int:
+        """FIX 2 — number of regime shifts already recorded for ``target_date``.
+
+        Used by the detector's rate limit: once three shifts are on the
+        books for a given day, further detection is skipped to prevent
+        weight-thrash from noise-driven firings."""
+        with self._conn() as c:
+            r = c.execute(
+                "SELECT COUNT(*) AS n FROM regime_shifts WHERE target_date=?",
+                (target_date,),
+            ).fetchone()
+            return int(r["n"] or 0)
+
     def recent_regime_shifts(self, days: int = 7) -> List[Dict]:
         with self._conn() as c:
             rows = c.execute(
