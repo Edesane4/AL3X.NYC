@@ -448,6 +448,14 @@ class DataSources:
     async def ecmwf(self, target_date: date,
                     also_obs: Optional[List[Dict[str, Any]]] = None
                     ) -> SourceResult:
+        # FIX 4 — live availability is 0/200 (every call returns "no
+        # target-date hours"). Root cause is not yet confirmed — likely
+        # model-id rename (ecmwf_ifs04 → ecmwf_ifs025 or ecmwf) or a
+        # timezone/horizon regression upstream. Diagnostic script:
+        # tools/diagnose_ecmwf.py. Sandbox in this session had no
+        # network egress so no live capture; do not change the model
+        # id speculatively. TODO: re-run the diagnostic on the host
+        # that owns al3x.db and apply the minimal fix it reveals.
         return await self.open_meteo(target_date, "ecmwf_ifs04", "ecmwf",
                                      also_obs=also_obs)
 
