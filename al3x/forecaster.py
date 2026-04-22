@@ -607,10 +607,13 @@ def _apply_corrections(target_date: date, regime: Dict[str, Any],
 
 class Forecaster:
     def __init__(self, storage, sources: DataSources,
-                 ai_calibrator=None) -> None:
+                 ai_calibrator=None, notifier=None) -> None:
         self.storage = storage
         self.sources = sources
         self.ai_calibrator = ai_calibrator
+        # UPGRADE D — optional TelegramNotifier for persistence-warning
+        # alerts. Kept optional so existing callers are unaffected.
+        self.notifier = notifier
         # BUG 2 — keep the climatology across produce() calls and rebuild
         # at most once per calendar day.
         self._clim: RateClimatology = RateClimatology()
@@ -1019,6 +1022,48 @@ class Forecaster:
             if mode == "intraday" and lead_hours <= 3:
                 uncertainty = max(0.5, uncertainty - 1.0)
 
+        # UPGRADE D — persistence sanity check. If forecast diverges
+        # from yesterday's CLI truth by >10°F with no significant regime
+        # change, log a warning, stash extras.persistence_warning = True,
+        # and (if a notifier is wired) enqueue a Telegram alert. This is
+        # informational ONLY — never auto-correct, or real regime shifts
+        # get silently suppressed.
+        persistence_warning = False
+        try:
+            from datetime import timedelta as _td
+            yday = (target_date - _td(days=1)).isoformat()
+            yday_cli = self.storage.get_cli_truth(yday)
+            yday_high = (float(yday_cli["recorded_high_f"])
+                         if yday_cli and yday_cli.get("recorded_high_f") is not None
+                         else None)
+            yday_fc = self.storage.latest_forecast(yday)
+            yday_regime = ((yday_fc.get("extras", {}) or {}).get("regime", {})
+                           if yday_fc else {}) or {}
+            regime_changed = (
+                regime.get("any_precip_peak") != yday_regime.get("any_precip_peak")
+                or regime.get("sea_breeze_full") != yday_regime.get("sea_breeze_full")
+                or regime.get("calm_clear") != yday_regime.get("calm_clear")
+            )
+            if (yday_high is not None
+                    and abs(final - yday_high) > 10.0
+                    and not regime_changed):
+                persistence_warning = True
+                log.warning(
+                    "PERSISTENCE_MISMATCH: forecast %.1f°F vs yesterday "
+                    "%.1f°F (%+.1f) with no regime change; check sources",
+                    final, yday_high, final - yday_high,
+                )
+                if self.notifier is not None and getattr(
+                        self.notifier, "configured", False):
+                    self.notifier.enqueue(
+                        "⚠️ <b>Persistence sanity check failed</b>\n"
+                        f"Forecast: {final:.1f}°F | Yesterday: "
+                        f"{yday_high:.1f}°F | "
+                        "No regime change — verify sources before trusting."
+                    )
+        except Exception as e:  # noqa: BLE001
+            log.info("persistence sanity check skipped: %s", e)
+
         revision = self.storage.last_revision(target_date.isoformat(), mode) + 1 \
             if mode == "intraday" else 0
 
@@ -1078,6 +1123,9 @@ class Forecaster:
                 "p90": gefs_r.meta.get("p90"),
                 "n_members": gefs_r.meta.get("n_members"),
             } if gefs_r and gefs_r.value is not None else None),
+            # UPGRADE D — informational flag if |forecast - yesterday| >10°F
+            # with no regime change. Never auto-corrects the forecast.
+            "persistence_warning": persistence_warning,
         }
 
         return {

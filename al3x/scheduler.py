@@ -57,7 +57,8 @@ class AgentScheduler:
         self.notifier = notifier
         self.sources = DataSources()
         self.forecaster = Forecaster(storage, self.sources,
-                                      ai_calibrator=ai_calibrator)
+                                      ai_calibrator=ai_calibrator,
+                                      notifier=notifier)
         self.learning = Learning(storage)
         self.scheduler = AsyncIOScheduler(timezone=str(cfg.EASTERN))
         # FIX 5 — run counts now live in the DB (see
