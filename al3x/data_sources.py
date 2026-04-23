@@ -448,6 +448,14 @@ class DataSources:
     async def ecmwf(self, target_date: date,
                     also_obs: Optional[List[Dict[str, Any]]] = None
                     ) -> SourceResult:
+        # FIX 4 — live availability is 0/200 (every call returns "no
+        # target-date hours"). Root cause is not yet confirmed — likely
+        # model-id rename (ecmwf_ifs04 → ecmwf_ifs025 or ecmwf) or a
+        # timezone/horizon regression upstream. Diagnostic script:
+        # tools/diagnose_ecmwf.py. Sandbox in this session had no
+        # network egress so no live capture; do not change the model
+        # id speculatively. TODO: re-run the diagnostic on the host
+        # that owns al3x.db and apply the minimal fix it reveals.
         return await self.open_meteo(target_date, "ecmwf_ifs04", "ecmwf",
                                      also_obs=also_obs)
 
@@ -497,18 +505,13 @@ class DataSources:
                 return SourceResult("gfs_ensemble",
                                     error="no target-date hours")
 
-            # Collect all member series. Open-Meteo keys are either
-            # temperature_2m_memberNN or temperature_2m (member 00).
-            member_maxes: List[float] = []
-            for key, series in hourly.items():
-                if not key.startswith("temperature_2m"):
-                    continue
-                if not isinstance(series, list):
-                    continue
-                vals = [series[i] for i in idx_today
-                        if i < len(series) and series[i] is not None]
-                if vals:
-                    member_maxes.append(float(max(vals)))
+            # FIX 3 — explicitly separate the control member
+            # (``temperature_2m``) from the perturbed-member series
+            # (``temperature_2m_memberNN``). The prior ``startswith``
+            # collapsed both keys into a single group and then failed
+            # to correctly collect them, yielding "only 1 members
+            # parsed" on every live call.
+            member_maxes = _parse_gfs_ensemble_members(hourly, idx_today)
 
             if len(member_maxes) < 3:
                 return SourceResult(
@@ -553,6 +556,60 @@ class DataSources:
 
 
 # ---------- Helpers ----------------------------------------------------------
+
+_GEFS_MEMBER_KEY_RE = re.compile(r"^temperature_2m_member\d+$")
+
+
+def _parse_gfs_ensemble_members(hourly: Dict[str, Any],
+                                 idx_today: List[int]) -> List[float]:
+    """Collect per-member daily-max °F from an Open-Meteo ensemble payload.
+
+    Open-Meteo's ensemble response returns the control run as
+    ``temperature_2m`` and each perturbed member as
+    ``temperature_2m_memberNN`` (NN is typically 01..30). The prior
+    ``startswith("temperature_2m")`` approach grouped both patterns
+    together and failed to collect them correctly, leaving only one
+    member — the diagnostic showed 0/200 successful live calls.
+
+    Strategy: grab the control explicitly, iterate the perturbed
+    members via a regex that excludes the bare ``temperature_2m`` key,
+    and dedupe by rounded max value so the control run isn't
+    double-counted if a feed also serves it as ``temperature_2m_member00``.
+    """
+    member_maxes: List[float] = []
+
+    def _max_on_target_date(series: Any) -> Optional[float]:
+        if not isinstance(series, list):
+            return None
+        vals = [series[i] for i in idx_today
+                if i < len(series) and series[i] is not None]
+        if not vals:
+            return None
+        return float(max(vals))
+
+    control = _max_on_target_date(hourly.get("temperature_2m"))
+    if control is not None:
+        member_maxes.append(control)
+
+    for key, series in hourly.items():
+        if not _GEFS_MEMBER_KEY_RE.match(key):
+            continue
+        m = _max_on_target_date(series)
+        if m is not None:
+            member_maxes.append(m)
+
+    # Deduplicate by rounded max (handles feeds that serve the control
+    # run as both ``temperature_2m`` and ``temperature_2m_member00``).
+    seen_rounded: set = set()
+    unique: List[float] = []
+    for v in member_maxes:
+        key = round(v, 2)
+        if key in seen_rounded:
+            continue
+        seen_rounded.add(key)
+        unique.append(v)
+    return unique
+
 
 _SKY_MAP = {"CLR": 0, "SKC": 0, "FEW": 15, "SCT": 40, "BKN": 75,
             "OVC": 100, "VV": 100}

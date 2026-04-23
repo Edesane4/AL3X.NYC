@@ -20,7 +20,12 @@ from typing import Any, Dict, List, Optional, Tuple
 log = logging.getLogger("al3x.bma")
 
 
-_MIN_HISTORY_DAYS = 10
+# FIX 5 — Short window so BMA adapts quickly when a source's accuracy
+# improves. Longer windows carry stale bias from earlier code paths:
+# BMA had learned a +6.99°F Kalman bias when Kalman's actual 8-day MAE
+# was 0.55°F, because the 30-day window kept integrating legacy
+# forecasts no longer reflective of current reality.
+_MIN_HISTORY_DAYS = 5
 _MIN_PER_SOURCE_N = 5
 _DEFAULT_VARIANCE = 4.0   # (°F)^2 — corresponds to ±2°F default 1σ
 
@@ -55,7 +60,7 @@ def compute_bma(source_values: Dict[str, float],
     histories: Dict[str, List[Tuple[str, float, float]]] = {}
     for s in active:
         try:
-            rows = storage.get_source_history(s, days=30)
+            rows = storage.get_source_history(s, days=10)
         except Exception as e:  # noqa: BLE001
             log.info("BMA: get_source_history failed for %s: %s", s, e)
             rows = []

@@ -1,0 +1,48 @@
+Session 1 — diagnostic run attempt (2026-04-22)
+==================================================
+
+Plan was: python3 tools/diagnose.py && python3 tools/diagnose_lead_time.py
+Neither script exists in this environment, and al3x.db is absent too
+(this is a clean sandbox, not the MacBook that owns the live DB).
+
+    $ ls tools/
+    diagnose_ecmwf.py           (created this session, Fix 4)
+    recompute_after_cli_fix.py
+
+    $ ls al3x.db
+    ls: cannot access 'al3x.db': No such file or directory
+
+Therefore no live diagnostic output was produced in this session.
+
+Separately, tools/diagnose_ecmwf.py (Fix 4) was invoked and reported:
+
+    Status code: 403
+    Response length: 21 bytes
+    Body: "Host not in allowlist"
+
+…because the sandbox blocks outbound HTTPS to api.open-meteo.com.
+Re-run on the MacBook to capture the actual Open-Meteo response and
+record the output in the script's top-level comment.
+
+Unit test suite results
+-----------------------
+$ python3 -m pytest tests/ -v
+
+    tests/test_bma_window.py::test_bma_produces_result_with_exactly_five_rows_per_source PASSED
+    tests/test_cli_parser.py::test_parse_observed_max_despite_normal_higher_in_text PASSED
+    tests/test_cli_parser.py::test_parse_observed_max_when_record_block_appears_first PASSED
+    tests/test_cli_parser.py::test_parse_returns_none_on_malformed_cli PASSED
+    tests/test_correction_cap.py::test_under_cap_no_scaling PASSED
+    tests/test_correction_cap.py::test_over_cap_negative_scaled_to_minus_three PASSED
+    tests/test_correction_cap.py::test_over_cap_positive_scaled_to_plus_three PASSED
+    tests/test_correction_cap.py::test_zero_total_no_issues PASSED
+    tests/test_correction_cap.py::test_suppressed_delta_is_not_scaled PASSED
+    tests/test_gfs_ensemble_parsing.py::test_thirty_members_plus_control_parsed PASSED
+    tests/test_gfs_ensemble_parsing.py::test_only_control_returns_single_member PASSED
+    tests/test_gfs_ensemble_parsing.py::test_control_duplicated_as_member00_is_deduped PASSED
+    tests/test_gfs_ensemble_parsing.py::test_unrelated_keys_ignored PASSED
+    tests/test_regime_detector.py::test_spread_change_below_threshold_no_shift PASSED
+    tests/test_regime_detector.py::test_spread_change_above_threshold_still_skipped_when_states_empty PASSED
+    tests/test_regime_detector.py::test_rate_limit_skips_detection_when_three_already_recorded PASSED
+
+    16 passed in 0.09s
