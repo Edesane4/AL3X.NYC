@@ -32,6 +32,19 @@ python app.py
 
 Open <http://localhost:8090> for the dashboard.
 
+## Running AL3X with log persistence
+
+Always start AL3X with log redirection so overnight events (cap fires,
+regime shifts, CLI verification) survive a terminal restart:
+
+```bash
+caffeinate -is python app.py 2>&1 | tee -a al3x.log
+```
+
+`caffeinate -is` keeps the MacBook awake (and CPU available) while the
+agent runs. The `al3x.log` file grows unboundedly. Rotate manually
+when it exceeds 100 MB or implement log rotation (future work).
+
 ### Telegram setup
 
 1. Message [@BotFather](https://t.me/BotFather) on Telegram, `/newbot`,

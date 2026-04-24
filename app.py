@@ -39,6 +39,27 @@ BASE = Path(__file__).resolve().parent
 STATIC = BASE / "static"
 
 
+# Session 2 G9 — port scanners and malformed localhost probes emit
+# "Invalid HTTP request" via uvicorn.error. Harmless but noisy. Filter
+# them out before any log handlers see the record.
+class _InvalidHttpFilter(logging.Filter):
+    """Suppress uvicorn 'Invalid HTTP request' access-log noise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return "Invalid HTTP request" not in msg
+
+
+logging.getLogger("uvicorn.error").addFilter(_InvalidHttpFilter())
+
+
+# Session 2 G7 — 5s TTL cache for /api/state. The dashboard polls this
+# endpoint every ~2s; without a cache that's ~51k DB queries/day. TTL
+# keeps the UI responsive while cutting load to ~17k/day.
+_STATE_CACHE: dict = {"ts": 0.0, "payload": None}
+_STATE_CACHE_TTL = 5.0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Wire up
@@ -87,6 +108,14 @@ async def index():
 
 @app.get("/api/state")
 async def state():
+    # Session 2 G7 — 5s TTL cache (see module-level _STATE_CACHE).
+    import time
+    now_ts = time.time()
+    cached_payload = _STATE_CACHE["payload"]
+    if cached_payload is not None and (
+            now_ts - _STATE_CACHE["ts"] < _STATE_CACHE_TTL):
+        return JSONResponse(cached_payload)
+
     storage: Storage = app.state.storage
     today = date.today().isoformat()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
@@ -124,7 +153,7 @@ async def state():
                  if o.get("temperature_f") is not None]
         running_max_f = max(temps) if temps else None
 
-    return JSONResponse({
+    payload = {
         "now": datetime.now(cfg.EASTERN).isoformat(),
         "target_today": today,
         "target_tomorrow": tomorrow,
@@ -143,7 +172,10 @@ async def state():
                            and app.state.ai_calibrator.enabled),
         "weights_override": storage.get_weights(),
         "biases_override": storage.get_biases(),
-    })
+    }
+    _STATE_CACHE["ts"] = now_ts
+    _STATE_CACHE["payload"] = payload
+    return JSONResponse(payload)
 
 
 @app.get("/api/history")

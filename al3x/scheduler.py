@@ -552,6 +552,16 @@ class AgentScheduler:
         Passes the latest AL3X forecast to the engine before each scan
         so fair values are always based on the freshest model output.
         """
+        # Session 2 G8 — short-circuit when credentials are unconfigured
+        # so we don't spam 401 Unauthorized log lines every 30 seconds.
+        # The scheduled job stays registered; it emits at debug level
+        # instead of tripping the Kalshi API. Once KALSHI_API_KEY_ID +
+        # KALSHI_PRIVATE_KEY_PATH are set in .env, the job resumes.
+        if not (os.getenv("KALSHI_API_KEY_ID")
+                and os.getenv("KALSHI_PRIVATE_KEY_PATH")):
+            log.debug("Kalshi scan skipped — no credentials configured")
+            return
+
         now = datetime.now(cfg.EASTERN)
         today_str = now.date().isoformat()
 
