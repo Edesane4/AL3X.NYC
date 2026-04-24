@@ -145,6 +145,16 @@ class AgentScheduler:
             id="kalshi_scan",
             next_run_time=datetime.now(cfg.EASTERN) + timedelta(seconds=15),
         )
+        # Session 2 G12 — daily morning brief at 7:00 AM Eastern.
+        # Sends the short summary via Telegram and writes the longer
+        # markdown version to the user's Obsidian vault when it's
+        # configured (OBSIDIAN_VAULT_PATH).
+        self.scheduler.add_job(
+            self._safe(self.morning_brief_cycle),
+            CronTrigger(hour=7, minute=0, timezone=str(cfg.EASTERN)),
+            id="morning_brief",
+            replace_existing=True,
+        )
         # Daily settlement — runs at 9:30 PM Eastern after markets close
         self.scheduler.add_job(
             self._safe(self.settle_positions_cycle),
@@ -612,6 +622,31 @@ class AgentScheduler:
                 )
         except Exception as e:  # noqa: BLE001
             log.warning("Settlement cycle error: %s", e)
+
+    async def morning_brief_cycle(self) -> None:
+        """Session 2 G12 — generate the morning brief and dispatch it.
+
+        Telegram gets the short summary. If ``OBSIDIAN_VAULT_PATH`` is
+        set and points to an existing vault, the longer markdown note
+        is written under ``05-Daily Check-ins/YYYY-MM-DD.md``.
+        """
+        try:
+            from .morning_brief import generate_morning_brief
+            from .obsidian_writer import write_daily_checkin
+        except Exception as e:  # noqa: BLE001
+            log.warning("morning brief imports failed: %s", e)
+            return
+        try:
+            content = generate_morning_brief(self.storage)
+        except Exception as e:  # noqa: BLE001
+            log.warning("morning brief generation failed: %s", e)
+            return
+        if self.notifier and self.notifier.configured:
+            self.notifier.enqueue(content["telegram"])
+        try:
+            write_daily_checkin(content["obsidian"], content["target_date"])
+        except Exception as e:  # noqa: BLE001
+            log.info("obsidian daily check-in skipped: %s", e)
 
     async def reset_daily_pnl(self) -> None:
         """Reset daily_pnl to 0.0 at midnight so CB1 does not

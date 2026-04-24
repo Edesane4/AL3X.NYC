@@ -675,6 +675,9 @@ class Forecaster:
         # at most once per calendar day.
         self._clim: RateClimatology = RateClimatology()
         self._clim_built_date: Optional[date] = None
+        # Session 2 G14 — per-day dedupe so the Obsidian cap-fired
+        # event note is appended at most once per target_date.
+        self._cap_event_fired_for: set[str] = set()
         # PERF 1 — cache BMA results by (target_date, mode) for 60 minutes
         self._bma_cache: Dict[str, Any] = {}
         self._bma_cache_ttl: int = 3600
@@ -1094,6 +1097,23 @@ class Forecaster:
         cap_fired = bool(cap_meta.get("cap_fired"))
         if cap_fired:
             uncertainty = max(uncertainty, uncertainty * 1.5)
+            # Session 2 G14 — emit a single Obsidian event note per day.
+            date_key = target_date.isoformat()
+            if date_key not in self._cap_event_fired_for:
+                self._cap_event_fired_for.add(date_key)
+                try:
+                    from .obsidian_writer import append_event
+                    event_body = (
+                        f"**Correction cap fired** at {now.isoformat()}\n"
+                        f"- Forecast: {final:.1f}°F\n"
+                        f"- Pre-cap total: "
+                        f"{cap_meta.get('pre_cap_total', 0):+.2f}°F\n"
+                        f"- Scale applied: "
+                        f"{cap_meta.get('scale', 1.0):.3f}"
+                    )
+                    append_event("cap-fired", event_body, target_date)
+                except Exception as e:  # noqa: BLE001
+                    log.info("obsidian cap-fired event skipped: %s", e)
 
         # UPGRADE D — persistence sanity check. If forecast diverges
         # from yesterday's CLI truth by >10°F with no significant regime
