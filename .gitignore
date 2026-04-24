@@ -7,3 +7,5 @@ al3x.db
 al3x.db-journal
 .DS_Store
 *.log
+morning.txt
+*.backup
