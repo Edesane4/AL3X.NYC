@@ -122,7 +122,12 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
     hours_of_data = (valid[-1][0] - valid[0][0]).total_seconds() / 3600.0
     prior_used = False
     if prior_rate is not None:
-        alpha = min(0.95, 0.3 + 0.065 * hours_of_data)
+        # Bug A fix — was 0.3 + 0.065*hours, cap 0.95. At 0h of data
+        # the Kalman rate is initialized to 0 (meaningless), so
+        # weighting it 30% against climatology was trusting noise.
+        # Start at 10% trust, grow to 90% by ~11h. Keep a 10%
+        # climatological anchor at ceiling.
+        alpha = min(0.90, 0.1 + 0.075 * hours_of_data)
         rate = alpha * rate + (1 - alpha) * float(prior_rate)
         prior_used = True
 
