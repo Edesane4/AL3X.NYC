@@ -18,6 +18,18 @@ from .quantile_forest import QuantileForest, _feature_vector as _qrf_fv
 
 log = logging.getLogger("al3x.forecaster")
 
+# Session 2 — hoisted from inline definitions inside produce(). Caps
+# the effective Kalman weight so post-mean re-normalization can't push
+# it above this ceiling when other sources drop out.
+MAX_KALMAN_WEIGHT = 0.60
+
+# Session 2 — blanket-disabled bias corrections. The correction payload
+# still computes and logs (suppressed_delta, suppressed, reason); only
+# the final delta applied to the forecast is zeroed. Re-enable a
+# single correction by removing its key from this set.
+_SESSION_2_SUPPRESSED = {"sea_breeze", "uhi", "cloud_timing",
+                         "precip", "inversion"}
+
 
 @dataclass
 class BiasLive:
@@ -599,6 +611,26 @@ def _apply_corrections(target_date: date, regime: Dict[str, Any],
             "reason": f"Model spread {spread:.1f}°F — corrections trusted",
         }
 
+    # Session 2 — uniformly suppress all correction deltas until 30+
+    # days of per-correction evidence proves value. Record the would-
+    # have-fired delta to ``suppressed_delta`` for post-hoc attribution
+    # scoring. Re-enable an individual correction by removing its key
+    # from the module-level ``_SESSION_2_SUPPRESSED`` set. The prior
+    # high-spread suppression block above remains in place; under this
+    # blanket suppression it becomes a no-op but we don't remove the code.
+    for name in _SESSION_2_SUPPRESSED:
+        if name not in corrections:
+            continue
+        c = corrections[name]
+        # Preserve an already-recorded suppressed_delta (e.g. from the
+        # high-spread branch above) rather than overwriting with 0.
+        if "suppressed_delta" not in c:
+            c["suppressed_delta"] = c["delta"]
+        c["suppressed"] = True
+        c["delta"] = 0.0
+        c["reason"] += (
+            " (suppressed: Session 2 blanket disable, tracking only)")
+
     total = sum(c["delta"] for c in corrections.values())
 
     # FIX 1 — cap total correction magnitude at ±3°F. On regime-shift days
@@ -643,6 +675,9 @@ class Forecaster:
         # at most once per calendar day.
         self._clim: RateClimatology = RateClimatology()
         self._clim_built_date: Optional[date] = None
+        # Session 2 G14 — per-day dedupe so the Obsidian cap-fired
+        # event note is appended at most once per target_date.
+        self._cap_event_fired_for: set[str] = set()
         # PERF 1 — cache BMA results by (target_date, mode) for 60 minutes
         self._bma_cache: Dict[str, Any] = {}
         self._bma_cache_ttl: int = 3600
@@ -820,7 +855,7 @@ class Forecaster:
             # Kalman above its intended blend_weight ceiling when other
             # sources drop out. Enforce an absolute ceiling here and
             # redistribute any overflow proportionally.
-            MAX_KALMAN_WEIGHT = 0.60
+            # Session 2 — ``MAX_KALMAN_WEIGHT`` now lives at module scope.
             if weights["kalman"] > MAX_KALMAN_WEIGHT:
                 overflow = weights["kalman"] - MAX_KALMAN_WEIGHT
                 weights["kalman"] = MAX_KALMAN_WEIGHT
@@ -836,7 +871,7 @@ class Forecaster:
         # redistributed and Kalman's realized weight can exceed
         # MAX_KALMAN_WEIGHT even though the pre-mean cap held. Enforce
         # the ceiling again on the realized weights and recompute.
-        MAX_KALMAN_WEIGHT = 0.60
+        # Session 2 — uses module-level ``MAX_KALMAN_WEIGHT``.
         if kalman_result and "kalman" in views:
             realized_kw = views["kalman"].weight
             if realized_kw > MAX_KALMAN_WEIGHT + 1e-9:
@@ -886,7 +921,14 @@ class Forecaster:
         self._bma_cache = {k: v for k, v in self._bma_cache.items()
                            if now_ts - v[0] < 7200}
         if bma_result is not None:
-            raw_ensemble = float(bma_result["bma_forecast_f"])
+            # Session 2 — BMA disabled in output due to phantom bias
+            # (+5.96°F Kalman bias not supported by 0.60°F Kalman MAE
+            # evidence). BMA continues computing and persisting to
+            # extras.bma for observability. Re-enable by uncommenting
+            # the line below after 30+ days of validated bias
+            # convergence.
+            # raw_ensemble = float(bma_result["bma_forecast_f"])
+            _bma_disabled_in_output = True  # noqa: F841
 
         # Corrections — regime now gets obs_today (Bug 1) + grid data (Gap 1)
         # + UPGRADE B airport ring obs (gradient-based regime confirmation)
@@ -1036,8 +1078,10 @@ class Forecaster:
             uncertainty = max(0.5, qrf_result["interval_width"] / 2.0)
         elif gefs_sigma is not None:
             uncertainty = max(0.5, gefs_sigma)
-        elif bma_result is not None:
-            uncertainty = float(bma_result["bma_variance_f"])
+        # Session 2 — BMA variance no longer contributes to uncertainty
+        # because BMA output is disabled. Re-enable alongside BMA output.
+        # elif bma_result is not None:
+        #     uncertainty = float(bma_result["bma_variance_f"])
         else:
             uncertainty = 2.0
             if spread >= 6:
@@ -1053,6 +1097,23 @@ class Forecaster:
         cap_fired = bool(cap_meta.get("cap_fired"))
         if cap_fired:
             uncertainty = max(uncertainty, uncertainty * 1.5)
+            # Session 2 G14 — emit a single Obsidian event note per day.
+            date_key = target_date.isoformat()
+            if date_key not in self._cap_event_fired_for:
+                self._cap_event_fired_for.add(date_key)
+                try:
+                    from .obsidian_writer import append_event
+                    event_body = (
+                        f"**Correction cap fired** at {now.isoformat()}\n"
+                        f"- Forecast: {final:.1f}°F\n"
+                        f"- Pre-cap total: "
+                        f"{cap_meta.get('pre_cap_total', 0):+.2f}°F\n"
+                        f"- Scale applied: "
+                        f"{cap_meta.get('scale', 1.0):.3f}"
+                    )
+                    append_event("cap-fired", event_body, target_date)
+                except Exception as e:  # noqa: BLE001
+                    log.info("obsidian cap-fired event skipped: %s", e)
 
         # UPGRADE D — persistence sanity check. If forecast diverges
         # from yesterday's CLI truth by >10°F with no significant regime

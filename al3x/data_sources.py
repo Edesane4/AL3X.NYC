@@ -968,9 +968,11 @@ def _extract_observed_max(plain: str) -> Optional[float]:
 
 def _observed_section(plain: str) -> Optional[str]:
     """Slice the observed-temperature block out of a CLI product."""
-    # First TEMPERATURE header (with or without (F) unit annotation).
+    # Bug C fix — require (F) or (^F) suffix so we match only the
+    # observed-temperature section, not prior-records headers that
+    # share the TEMPERATURE prefix.
     header = re.search(
-        r"(?im)^[ \t]*TEMPERATURE\b[^\n]*$",
+        r"(?im)^[ \t]*TEMPERATURE[ \t]*\((?:\^?F)\)[^\n]*$",
         plain,
     )
     if header is None:
