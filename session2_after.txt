@@ -1,0 +1,11 @@
+(al3x.db not found at /home/user/AL3X.NYC/al3x.db — DB sections skipped)
+==============================================================================
+MORNING CHECK-IN
+==============================================================================
+  [1] Correction cap: LOG NOT FOUND
+  [2] Regime shifts yesterday: N/A
+  [3] BMA Kalman bias: N/A
+  [4] ECMWF cycles fresh (24h): N/A
+
+
+(tools/diagnose_lead_time.py is not present in this repo; skipping)
