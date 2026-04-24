@@ -9,7 +9,22 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
+from al3x import forecaster as fc
 from al3x.forecaster import BiasLive, _apply_corrections
+
+
+@pytest.fixture(autouse=True)
+def _disable_session2_blanket_suppression(monkeypatch):
+    """The FIX 1 cap runs AFTER the Session 2 blanket correction
+    suppressor, so under default module state every delta is zeroed
+    before the cap ever sees the sum. Clear the suppression set inside
+    this test module so we can exercise the Session 1 cap logic in
+    isolation — the cap itself is still live code and re-activates
+    when Session 2 flips corrections back on.
+    """
+    monkeypatch.setattr(fc, "_SESSION_2_SUPPRESSED", set())
 
 
 def _fake_regime(**overrides):

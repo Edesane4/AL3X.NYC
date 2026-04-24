@@ -23,6 +23,13 @@ log = logging.getLogger("al3x.forecaster")
 # it above this ceiling when other sources drop out.
 MAX_KALMAN_WEIGHT = 0.60
 
+# Session 2 — blanket-disabled bias corrections. The correction payload
+# still computes and logs (suppressed_delta, suppressed, reason); only
+# the final delta applied to the forecast is zeroed. Re-enable a
+# single correction by removing its key from this set.
+_SESSION_2_SUPPRESSED = {"sea_breeze", "uhi", "cloud_timing",
+                         "precip", "inversion"}
+
 
 @dataclass
 class BiasLive:
@@ -608,11 +615,9 @@ def _apply_corrections(target_date: date, regime: Dict[str, Any],
     # days of per-correction evidence proves value. Record the would-
     # have-fired delta to ``suppressed_delta`` for post-hoc attribution
     # scoring. Re-enable an individual correction by removing its key
-    # from ``_SESSION_2_SUPPRESSED``. The prior high-spread suppression
-    # block above remains in place; under this blanket suppression it
-    # becomes a no-op but we don't remove the code.
-    _SESSION_2_SUPPRESSED = {"sea_breeze", "uhi", "cloud_timing",
-                             "precip", "inversion"}
+    # from the module-level ``_SESSION_2_SUPPRESSED`` set. The prior
+    # high-spread suppression block above remains in place; under this
+    # blanket suppression it becomes a no-op but we don't remove the code.
     for name in _SESSION_2_SUPPRESSED:
         if name not in corrections:
             continue
