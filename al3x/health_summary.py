@@ -158,7 +158,7 @@ def _source_health(
         meta = SOURCE_META.get(name, {})
         cur = sources.get(name) or {}
         cur_val = _safe_float(cur.get("value"))
-        weight = _safe_float(cur.get("weight_pct"))
+        weight = _safe_float(cur.get("weight"))
         err = cur.get("error") or ""
 
         status, reason = _classify_source(name, cur, last_seen.get(name), now_et)
@@ -167,7 +167,7 @@ def _source_health(
             "name": name,
             "label": meta.get("label", name),
             "value_f": round(cur_val, 2) if cur_val is not None else None,
-            "weight_pct": round(weight, 2) if weight is not None else None,
+            "weight_pct": round(weight * 100) if weight is not None else None,
             "status": status,
             "status_reason": reason,
             "error": err,
@@ -319,7 +319,7 @@ def _kalman_info(
     k_extras = extras.get("kalman") or {}
 
     cur_val = _safe_float(k_cur.get("value"))
-    weight = _safe_float(k_cur.get("weight_pct"))
+    weight = _safe_float(k_cur.get("weight"))
 
     # Reconstruct per-date Kalman projection from intraday forecasts
     per_date_kalman: Dict[date, float] = {}
@@ -393,7 +393,7 @@ def _kalman_info(
 
     return {
         "value_f": round(cur_val, 2) if cur_val is not None else None,
-        "weight_pct": round(weight, 2) if weight is not None else None,
+        "weight_pct": round(weight * 100) if weight is not None else None,
         "mae_f": mae_f,
         "samples": samples,
         "healthy": healthy,
