@@ -812,7 +812,7 @@ function renderHealth(h) {
   const corr = wi.corrections;
   const corrRoot = document.getElementById("whatIfCorrections");
   const corrSummary = document.getElementById("whatIfCorrSummary");
-  const perList = corr ? (corr.per_correction || corr.per || []) : [];
+  const perList = corr ? (corr.per_correction || []) : [];
   if (corr && perList.length) {
     corrRoot.innerHTML = perList
       .filter(c => c.name !== "spread_penalty")

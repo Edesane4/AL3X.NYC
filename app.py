@@ -174,6 +174,18 @@ async def state():
         "weights_override": storage.get_weights(),
         "biases_override": storage.get_biases(),
     }
+    # Session 3 fix — alias keys so build_health_summary reads the
+    # same payload that's persisted to /api/state. The /api/state
+    # payload uses descriptive names; the health builder was written
+    # against shorter names. Aliasing here keeps health_summary.py
+    # pure and untouched. These aliases are additive — original keys
+    # remain available for any other consumer.
+    payload["anchor"] = payload.get("latest_today") or payload.get("latest_tomorrow")
+    payload["truth_today"] = payload.get("cli_truth_today")
+    payload["scores"] = payload.get("scores_30d") or []
+    payload["running_max_f"] = payload.get("running_max_today_f")
+    payload["now_et"] = payload.get("now")
+
     # Session 3 — plain-English health summary derived from the
     # payload we just built. No extra DB queries; build_health_summary
     # is pure over payload. If the builder raises, degrade to a red

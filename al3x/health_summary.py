@@ -242,7 +242,7 @@ def _what_if(anchor: Dict[str, Any]) -> Dict[str, Any]:
         })
 
     corrections_out = {
-        "per": per,
+        "per_correction": per,
         "any_suppressed": any_suppressed,
         "total_shadow_delta_f": round(total_shadow_delta, 2),
         "shadow_forecast_f": round(final_f + total_shadow_delta, 2),
@@ -959,7 +959,7 @@ def build_health_summary(state: Dict[str, Any]) -> Dict[str, Any]:
             "forecast_narrative": "No data available.",
             "sources": [],
             "what_if": {"bma": None, "corrections": {
-                "per": [], "any_suppressed": False, "total_shadow_delta_f": 0.0,
+                "per_correction": [], "any_suppressed": False, "total_shadow_delta_f": 0.0,
                 "shadow_forecast_f": 0.0, "enabled": True, "note": "Corrections active",
             }},
             "regime_narrative": "No regime data yet — waiting for first cycle.",
