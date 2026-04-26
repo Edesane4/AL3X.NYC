@@ -347,6 +347,60 @@ class DataSources:
     # NAM-MOS intentionally removed: IEM does not archive NAM-MOS for KNYC.
 
     # ---- Open-Meteo: HRRR + ECMWF --------------------------------------
+    async def _get_with_retry_5xx(self, url: str, params: Dict[str, Any],
+                                   source_name: str,
+                                   max_attempts: int = 2,
+                                   backoff_seconds: float = 2.0
+                                   ) -> httpx.Response:
+        """GET with one retry on transient upstream failure.
+
+        Retries only on:
+          - HTTP 5xx responses (server-side, often transient)
+          - httpx.ConnectError, ReadTimeout, RemoteProtocolError
+
+        Does NOT retry on 4xx (caller bug) or parse failures (caller's job).
+
+        Raises the final httpx exception or returns the final Response.
+        Caller is responsible for raise_for_status() if it wants to treat
+        non-2xx as errors.
+
+        Added Session 4 Part 3 to fix the 2026-04-26 8:00 AM ECMWF 502
+        that killed an entire intraday cycle.
+        """
+        import asyncio
+        last_exc: Optional[Exception] = None
+        last_response: Optional[httpx.Response] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = await self._client.get(url, params=params)
+                if 500 <= r.status_code < 600:
+                    last_response = r
+                    if attempt < max_attempts:
+                        log.info("%s upstream %d on attempt %d/%d, retrying "
+                                 "after %.1fs backoff",
+                                 source_name, r.status_code, attempt,
+                                 max_attempts, backoff_seconds)
+                        await asyncio.sleep(backoff_seconds)
+                        continue
+                    return r
+                return r
+            except (httpx.ConnectError, httpx.ReadTimeout,
+                    httpx.RemoteProtocolError) as e:
+                last_exc = e
+                if attempt < max_attempts:
+                    log.info("%s transient error %s on attempt %d/%d, "
+                             "retrying after %.1fs backoff",
+                             source_name, type(e).__name__, attempt,
+                             max_attempts, backoff_seconds)
+                    await asyncio.sleep(backoff_seconds)
+                    continue
+                raise
+        if last_response is not None:
+            return last_response
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"{source_name}: retry loop exited without result")
+
     async def open_meteo(self, target_date: date, model: str,
                          name: str,
                          also_obs: Optional[List[Dict[str, Any]]] = None
@@ -368,7 +422,7 @@ class DataSources:
                 "forecast_days": 3,
                 "past_days": 1,
             }
-            r = await self._client.get(cfg.OPEN_METEO, params=params)
+            r = await self._get_with_retry_5xx(cfg.OPEN_METEO, params, name)
             r.raise_for_status()
             js = r.json()
             times = js.get("hourly", {}).get("time", [])
