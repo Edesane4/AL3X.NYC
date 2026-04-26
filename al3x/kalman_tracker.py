@@ -53,7 +53,8 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
                        running_max_f: Optional[float],
                        ensemble_value_f: Optional[float],
                        hrrr_peak_f: Optional[float] = None,
-                       prior_rate: Optional[float] = None
+                       prior_rate: Optional[float] = None,
+                       now: Optional[datetime] = None,
                        ) -> Optional[Dict[str, Any]]:
     """Return {"projected_max_f", "kalman_uncertainty_f", "hours_of_data_used",
     "blend_weight"} or None.
@@ -76,7 +77,8 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
         return None
 
     valid.sort(key=lambda x: x[0])
-    now = datetime.now(cfg.EASTERN)
+    if now is None:
+        now = datetime.now(cfg.EASTERN)
 
     # Initialize state with first observation, zero rate.
     x = [valid[0][1], 0.0]          # [temp, rate_°F_per_hour]

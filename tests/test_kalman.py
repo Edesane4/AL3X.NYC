@@ -54,10 +54,14 @@ def test_noisy_observations_converge_near_truth():
              truth + random.gauss(0.0, 0.4))
         for i in range(6)
     ]
+    # Fix A (Session 4) refuses to project when rate is non-positive pre-peak
+    # without warming evidence. This test validates filter convergence, not
+    # projection policy — give it hrrr_peak_f=truth so running_max_f >=
+    # hrrr_peak_f satisfies the warming-evidence clause and Kalman proceeds.
     result = project_daily_max(obs, hrrr_hourly=None,
                                 running_max_f=truth,
                                 ensemble_value_f=None,
-                                hrrr_peak_f=None)
+                                hrrr_peak_f=truth)
     assert result is not None
     # Filter's latest temp estimate should be within ±1°F of truth
     assert abs(result["current_temp_f"] - truth) <= 1.0
@@ -96,3 +100,81 @@ def test_bug_a_prior_rate_weights_ninety_percent_at_zero_hours():
     )
     # Upper bound sanity: can't exceed the prior itself.
     assert result["rate_f_per_hr"] <= prior_rate + 1e-6
+
+
+def test_fix_a_refuses_projection_in_pre_dawn_cooling():
+    """Real bug from 2026-04-26 5:42 AM: Kalman projected daily max at
+    45.9°F because pre-dawn cooling produced a negative rate, the
+    projection collapsed to current_temp, and HRRR ceiling pulled it up
+    only modestly. With Fix A, Kalman now declines to project under
+    these conditions and lets the rest of the ensemble carry the
+    forecast.
+    """
+    fixed_now = datetime(2026, 4, 26, 5, 42, tzinfo=cfg.EASTERN)
+    obs = []
+    for hours_ago in range(5, 0, -1):  # 5h ago down to 1h ago
+        ts = fixed_now - timedelta(hours=hours_ago)
+        # Slight cooling: 44.0 → 42.5 across the window
+        temp = 42.5 + 0.3 * hours_ago
+        obs.append({"observed_at": ts.isoformat(), "temperature_f": temp})
+
+    # HRRR forecasts a 51°F peak; running_max so far is only 42.8°F
+    # (well below HRRR), so there's no observed evidence of warming.
+    hrrr_hourly = [(15.0, 50.5), (16.0, 51.0), (17.0, 50.0)]
+    result = project_daily_max(
+        obs, hrrr_hourly,
+        running_max_f=42.8,
+        ensemble_value_f=None,
+        hrrr_peak_f=51.0,
+        now=fixed_now,
+    )
+    assert result is None, (
+        f"Fix A regression: Kalman should have refused to project under "
+        f"pre-dawn cooling with no warming evidence, but returned {result}"
+    )
+
+
+def test_fix_b_blend_weight_gated_on_post_sunrise_hours():
+    """Pre-sunrise observations don't carry signal about today's peak.
+    Even with 4+ hours of overnight data accumulated since midnight,
+    blend_weight should stay at the lowest band (0.05) until 2+ hours
+    past sunrise. Verifies Fix B's swap from raw hours_of_data to
+    useful_daytime_hours.
+    """
+    fixed_now = datetime(2026, 4, 26, 5, 0, tzinfo=cfg.EASTERN)
+    obs = []
+    # Slight WARMING trend (positive rate so Fix A doesn't trip):
+    # 40°F at 5h ago → 44°F now
+    for hours_ago in range(5, 0, -1):
+        ts = fixed_now - timedelta(hours=hours_ago)
+        temp = 45.0 - 1.0 * hours_ago
+        obs.append({"observed_at": ts.isoformat(), "temperature_f": temp})
+
+    # running_max already meets HRRR peak so warming-evidence clause is
+    # satisfied (Fix A won't fire even if rate dips negative after blend).
+    hrrr_hourly = [(15.0, 60.0)]
+    result = project_daily_max(
+        obs, hrrr_hourly,
+        running_max_f=60.0,
+        ensemble_value_f=None,
+        hrrr_peak_f=60.0,
+        now=fixed_now,
+    )
+    assert result is not None, "expected projection (Fix A should not fire)"
+    # hours_of_data is wall-clock span of obs (~4h), which used to bump
+    # blend_weight to 0.35. With Fix B, useful_daytime_hours is 0 (5 AM
+    # is pre-sunrise in April), so blend_weight should be at the lowest
+    # band.
+    assert result["hours_of_data_used"] >= 4.0, (
+        f"sanity check failed: hours_of_data_used should be >= 4 in "
+        f"this scenario, got {result['hours_of_data_used']}"
+    )
+    assert result["useful_daytime_hours"] == 0.0, (
+        f"useful_daytime_hours should be 0 at 5 AM (pre-sunrise), "
+        f"got {result['useful_daytime_hours']}"
+    )
+    assert result["blend_weight"] == 0.05, (
+        f"Fix B regression: pre-sunrise blend_weight should be 0.05 "
+        f"(no daytime signal), got {result['blend_weight']} — this "
+        f"means the ladder is still keying on raw hours_of_data"
+    )
