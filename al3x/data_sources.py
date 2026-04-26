@@ -502,15 +502,17 @@ class DataSources:
     async def ecmwf(self, target_date: date,
                     also_obs: Optional[List[Dict[str, Any]]] = None
                     ) -> SourceResult:
-        # FIX 4 — live availability is 0/200 (every call returns "no
-        # target-date hours"). Root cause is not yet confirmed — likely
-        # model-id rename (ecmwf_ifs04 → ecmwf_ifs025 or ecmwf) or a
-        # timezone/horizon regression upstream. Diagnostic script:
-        # tools/diagnose_ecmwf.py. Sandbox in this session had no
-        # network egress so no live capture; do not change the model
-        # id speculatively. TODO: re-run the diagnostic on the host
-        # that owns al3x.db and apply the minimal fix it reveals.
-        return await self.open_meteo(target_date, "ecmwf_ifs04", "ecmwf",
+        # Session 5 Part 2 — Open-Meteo deprecated ecmwf_ifs04 data
+        # population. The endpoint still returns 200 OK, but every
+        # temperature value comes back as null, which open_meteo()
+        # filters out as "no target-date hours". Live verification on
+        # 2026-04-26 confirmed ecmwf_ifs025 returns 96/96 non-null
+        # values for the same params. ecmwf_ifs025 is the IFS 0.25°
+        # grid, the direct successor to ifs04. AIFS variants
+        # (ecmwf_aifs025_single) also work but represent a different
+        # model class with less calibration history; staying classical
+        # for now.
+        return await self.open_meteo(target_date, "ecmwf_ifs025", "ecmwf",
                                      also_obs=also_obs)
 
     # ---- UPGRADE A: GEFS ensemble spread -------------------------------

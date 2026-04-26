@@ -65,7 +65,7 @@ when it exceeds 100 MB or implement log rotation (future work).
 | GFS-MOS | `mdl.nws.noaa.gov/api/product/glamos/` | bias-corrected station guidance |
 | NAM-MOS | `mdl.nws.noaa.gov/api/product/nammos/` | short-range guidance |
 | HRRR (via Open-Meteo) | `api.open-meteo.com/v1/forecast?models=best_match` | 3 km high-res 0–18 h |
-| ECMWF (via Open-Meteo) | `api.open-meteo.com/v1/forecast?models=ecmwf_ifs04` | best global for day+1 |
+| ECMWF (via Open-Meteo) | `api.open-meteo.com/v1/forecast?models=ecmwf_ifs025` | best global for day+1 |
 | NWS CLI | `forecast.weather.gov/product.php?...&product=CLI` | evening ground truth |
 
 Default ensemble weights (Night-Before):
