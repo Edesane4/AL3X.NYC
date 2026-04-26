@@ -179,6 +179,192 @@
   .stat .v { font-size: 22px; font-weight: 700; }
   .stat .l { color: var(--muted); font-size: 11px; text-transform: uppercase;
              letter-spacing: 0.1em; margin-top: 4px; }
+
+  /* Session 3 — plain-English health strip */
+  .health-strip {
+    grid-column: span 2;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 18px; align-items: center;
+  }
+  @media (max-width: 960px) {
+    .health-strip { grid-template-columns: 1fr; grid-column: auto; }
+  }
+  .traffic-light {
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 6px; min-width: 110px;
+  }
+  .traffic-dot {
+    width: 52px; height: 52px; border-radius: 50%;
+    box-shadow: 0 0 0 6px rgba(255,255,255,0.04),
+                inset 0 -8px 16px rgba(0,0,0,0.35);
+  }
+  .traffic-dot.green  { background: radial-gradient(circle at 35% 30%, #a7ff9c, #21b34a);
+                        box-shadow: 0 0 24px rgba(88,226,125,0.55),
+                                    inset 0 -8px 16px rgba(0,0,0,0.35); }
+  .traffic-dot.yellow { background: radial-gradient(circle at 35% 30%, #ffe491, #e2a20a);
+                        box-shadow: 0 0 24px rgba(255,207,91,0.55),
+                                    inset 0 -8px 16px rgba(0,0,0,0.35); }
+  .traffic-dot.red    { background: radial-gradient(circle at 35% 30%, #ff9d9d, #cc2323);
+                        box-shadow: 0 0 24px rgba(255,110,110,0.55),
+                                    inset 0 -8px 16px rgba(0,0,0,0.35); }
+  .traffic-label {
+    text-transform: uppercase; letter-spacing: 0.14em;
+    font-size: 11px; font-weight: 700; color: var(--muted);
+  }
+  .health-text .headline {
+    font-size: 20px; font-weight: 600; line-height: 1.3;
+    margin-bottom: 6px;
+  }
+  .health-text .narrative {
+    color: var(--muted); font-size: 14px; line-height: 1.55;
+  }
+
+  /* Countdowns */
+  .countdowns {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 10px; margin-top: 14px;
+  }
+  @media (max-width: 720px) {
+    .countdowns { grid-template-columns: repeat(2, 1fr); }
+  }
+  .cd {
+    padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: 10px; background: rgba(255,255,255,0.02);
+  }
+  .cd .lbl {
+    color: var(--muted); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.12em; font-weight: 600;
+  }
+  .cd .val {
+    font-variant-numeric: tabular-nums; font-size: 18px;
+    font-weight: 600; margin-top: 4px;
+  }
+  .cd.hot .val  { color: var(--warm); }
+  .cd.live .val { color: var(--ok); }
+
+  /* What-If panel */
+  .whatif-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 10px 0; border-bottom: 1px dashed var(--border); gap: 10px;
+  }
+  .whatif-row:last-child { border-bottom: none; }
+  .whatif-row .name   { color: var(--text); font-size: 13px; flex: 0 0 auto; }
+  .whatif-row .reason { color: var(--muted); font-size: 11px; flex: 1;
+                        padding-left: 10px; }
+  .whatif-row .sd {
+    font-variant-numeric: tabular-nums; font-weight: 600;
+    font-size: 13px; min-width: 70px; text-align: right;
+  }
+  .whatif-row .sd.pos { color: var(--warm); }
+  .whatif-row .sd.neg { color: var(--cool); }
+  .whatif-summary {
+    margin-top: 14px; padding: 12px;
+    border-radius: 10px; background: rgba(95,184,255,0.06);
+    border: 1px solid rgba(95,184,255,0.22);
+    font-size: 13px; line-height: 1.5;
+  }
+  .whatif-summary strong { color: var(--accent); }
+
+  /* Source health rows */
+  .src-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 0; font-size: 13px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .src-row:last-child { border-bottom: none; }
+  .src-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+  .src-dot.green  { background: var(--ok);   box-shadow: 0 0 8px rgba(88,226,125,0.6); }
+  .src-dot.yellow { background: var(--warn); box-shadow: 0 0 8px rgba(255,207,91,0.5); }
+  .src-dot.red    { background: var(--err);  box-shadow: 0 0 8px rgba(255,110,110,0.5); }
+  .src-name   { flex: 0 0 155px; color: var(--text); font-weight: 500; }
+  .src-val    { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 55px; }
+  .src-wt     { font-variant-numeric: tabular-nums; color: var(--muted);
+                min-width: 38px; text-align: right; font-size: 12px; }
+  .src-reason { color: var(--muted); font-size: 11px; flex: 1; text-align: right; }
+
+  /* Cold-start progress bars */
+  .pb {
+    display: flex; align-items: center; gap: 12px; padding: 10px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .pb:last-child { border-bottom: none; }
+  .pb .pb-label { flex: 0 0 125px; color: var(--muted); font-size: 12px; }
+  .pb .pb-track {
+    flex: 1; height: 8px; background: rgba(255,255,255,0.05);
+    border-radius: 999px; overflow: hidden; position: relative;
+  }
+  .pb .pb-fill {
+    position: absolute; left: 0; top: 0; height: 100%;
+    background: linear-gradient(90deg, #4ea3ff 0%, #58e27d 100%);
+    border-radius: 999px; transition: width 0.6s ease;
+  }
+  .pb .pb-count {
+    font-variant-numeric: tabular-nums; color: var(--text); font-size: 12px;
+    flex: 0 0 auto; min-width: 72px; text-align: right;
+  }
+
+  /* Open issues */
+  .issue {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 10px 0; border-bottom: 1px dashed var(--border);
+  }
+  .issue:last-child { border-bottom: none; }
+  .sev {
+    flex: 0 0 56px; font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    padding: 3px 7px; border-radius: 6px; text-align: center;
+  }
+  .sev.high   { background: rgba(255,110,110,0.15); color: var(--err);
+                border: 1px solid rgba(255,110,110,0.35); }
+  .sev.medium { background: rgba(255,207,91,0.15); color: var(--warn);
+                border: 1px solid rgba(255,207,91,0.35); }
+  .sev.low    { background: rgba(95,184,255,0.12); color: var(--accent);
+                border: 1px solid rgba(95,184,255,0.28); }
+  .issue .ti { font-size: 13px; font-weight: 500; }
+  .issue .de { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+  /* Bet scorecard */
+  .bet {
+    padding: 14px; border-radius: 12px;
+    background: linear-gradient(135deg, rgba(95,184,255,0.06), rgba(106,255,208,0.04));
+    border: 1px solid rgba(95,184,255,0.25);
+    margin-top: 14px;
+  }
+  .bet .verdict { font-weight: 700; font-size: 15px; color: var(--accent);
+                  margin-bottom: 6px; }
+  .bet .verdict.paying    { color: var(--ok); }
+  .bet .verdict.improving { color: var(--accent); }
+  .bet .verdict.mixed     { color: var(--warn); }
+  .bet .verdict.notyet    { color: var(--err); }
+  .bet .gap {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 12px; color: var(--muted); margin-top: 6px;
+  }
+  .bet .note { color: var(--muted); font-size: 12px; margin-top: 8px;
+               line-height: 1.5; }
+
+  /* InSigma callout */
+  .insigma {
+    display: flex; align-items: center; gap: 10px; margin-top: 8px;
+    padding: 10px; background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border); border-radius: 10px;
+  }
+  .insigma .v {
+    font-variant-numeric: tabular-nums; font-weight: 700;
+    font-size: 20px; color: var(--warn); min-width: 60px;
+  }
+  .insigma .l { color: var(--muted); font-size: 12px; }
+
+  /* Regime narrator */
+  .regime-narr {
+    padding: 10px 12px; border-radius: 10px;
+    background: rgba(95,184,255,0.04);
+    border: 1px solid rgba(95,184,255,0.15);
+    font-size: 13px; line-height: 1.5; color: var(--text);
+    margin-bottom: 14px;
+  }
+  .regime-narr strong { color: var(--accent); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -198,6 +384,62 @@
 </header>
 
 <main>
+  <!-- Session 3 — Health at a glance (plain English) -->
+  <section class="card health-strip">
+    <div class="traffic-light">
+      <div class="traffic-dot green" id="trafficDot"></div>
+      <div class="traffic-label" id="trafficLabel">BOOTING</div>
+    </div>
+    <div class="health-text">
+      <div class="headline" id="healthHeadline">Waiting for first cycle…</div>
+      <div class="narrative" id="healthNarrative">—</div>
+      <div class="countdowns" id="countdowns"></div>
+    </div>
+  </section>
+
+  <!-- Session 3 — Regime + What-If -->
+  <section class="card" style="grid-column: span 2">
+    <h2>Forecast context — what's happening and what's being suppressed</h2>
+    <div class="regime-narr" id="regimeNarr">—</div>
+    <div class="twocol">
+      <div>
+        <h2 style="margin-top:0">What-if: corrections</h2>
+        <div id="whatIfCorrections">
+          <div class="empty">—</div>
+        </div>
+        <div class="whatif-summary" id="whatIfCorrSummary" style="display:none"></div>
+      </div>
+      <div>
+        <h2 style="margin-top:0">What-if: BMA</h2>
+        <div id="whatIfBMA">
+          <div class="empty">—</div>
+        </div>
+      </div>
+    </div>
+    <div class="bet" id="betScorecard" style="display:none"></div>
+  </section>
+
+  <!-- Session 3 — Source health + Cold start -->
+  <section class="card">
+    <h2>Source health</h2>
+    <div id="sourceHealth"><div class="empty">—</div></div>
+  </section>
+
+  <section class="card">
+    <h2>Cold-start progress (evidence accumulating)</h2>
+    <div id="coldStart"><div class="empty">—</div></div>
+    <div class="insigma" id="inSigmaBox" style="display:none">
+      <div class="v" id="inSigmaVal">—</div>
+      <div class="l" id="inSigmaLabel">—</div>
+    </div>
+  </section>
+
+  <!-- Session 3 — Open issues + alerts -->
+  <section class="card" style="grid-column: span 2">
+    <h2>Open issues &amp; alerts</h2>
+    <div id="openIssues"><div class="empty">No open issues.</div></div>
+  </section>
+
   <!-- Hero cards: today + tomorrow -->
   <section class="card hero">
     <div>
@@ -336,6 +578,9 @@ function render(state) {
     new Date(state.now).toLocaleTimeString("en-US");
   document.getElementById("lastUpdated").textContent =
     "updated " + new Date().toLocaleTimeString("en-US");
+
+  // Session 3 — render plain-English health first
+  if (state.health) renderHealth(state.health);
 
   document.getElementById("todayDate").textContent = state.target_today;
   document.getElementById("tomorrowDate").textContent = state.target_tomorrow;
@@ -502,12 +747,230 @@ function render(state) {
 function prettySource(k) {
   return { hrrr: "HRRR (3 km)", nws_point: "NWS Point Forecast",
     gfs_mos: "GFS-MOS", nam_mos: "NAM-MOS", ecmwf: "ECMWF",
-    nbm: "NBM", asos_trend: "KNYC ASOS trend" }[k] || k;
+    nbm: "NBM", asos_trend: "KNYC ASOS trend",
+    kalman: "Kalman projection", gfs_ensemble: "GEFS ensemble" }[k] || k;
 }
 function prettyCorrection(k) {
   return { sea_breeze: "Sea breeze", uhi: "Urban heat island",
     cloud_timing: "Cloud timing", precip: "Precipitation",
     inversion: "Inversion / fog", spread_penalty: "Model spread" }[k] || k;
+}
+
+// ---- Session 3 — plain-English health renderer ------------------------
+
+function fmtDur(sec) {
+  if (sec === null || sec === undefined) return "—";
+  if (sec <= 0) return "now";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function renderHealth(h) {
+  if (!h) return;
+
+  // Traffic light
+  const dot = document.getElementById("trafficDot");
+  dot.classList.remove("green", "yellow", "red");
+  dot.classList.add(h.status || "yellow");
+  document.getElementById("trafficLabel").textContent =
+    (h.status || "unknown").toUpperCase();
+  document.getElementById("healthHeadline").textContent = h.headline || "—";
+  document.getElementById("healthNarrative").textContent =
+    h.forecast_narrative || "—";
+
+  // Countdowns
+  const cd = h.countdowns || {};
+  const cdRoot = document.getElementById("countdowns");
+  const cdItems = [
+    { lbl: "Next intraday", sec: cd.next_intraday_in_sec,
+      hot: cd.next_intraday_in_sec !== undefined && cd.next_intraday_in_sec < 120 },
+    { lbl: cd.cli_window_open ? "CLI window OPEN" : "CLI window opens",
+      sec: cd.next_cli_in_sec,
+      live: cd.cli_window_open },
+    { lbl: "Morning brief", sec: cd.next_morning_in_sec,
+      hot: cd.next_morning_in_sec !== undefined && cd.next_morning_in_sec < 3600 },
+    { lbl: "Night-before", sec: cd.next_night_before_in_sec },
+  ];
+  cdRoot.innerHTML = cdItems.map(i => {
+    const cls = i.live ? "live" : (i.hot ? "hot" : "");
+    return `<div class="cd ${cls}">
+      <div class="lbl">${esc(i.lbl)}</div>
+      <div class="val">${fmtDur(i.sec)}</div>
+    </div>`;
+  }).join("");
+
+  // Regime narrative
+  document.getElementById("regimeNarr").innerHTML =
+    `<strong>Context:</strong> ${esc(h.regime_narrative || "—")}`;
+
+  // What-if corrections
+  const wi = h.what_if || {};
+  const corr = wi.corrections;
+  const corrRoot = document.getElementById("whatIfCorrections");
+  const corrSummary = document.getElementById("whatIfCorrSummary");
+  const perList = corr ? (corr.per_correction || []) : [];
+  if (corr && perList.length) {
+    corrRoot.innerHTML = perList
+      .filter(c => c.name !== "spread_penalty")
+      .map(c => {
+        const d = c.shadow_delta_f;
+        const cls = d > 0.05 ? "pos" : (d < -0.05 ? "neg" : "");
+        const badge = c.suppressed
+          ? `<span class="chip warn" style="font-size:10px;padding:2px 7px">OFF</span>`
+          : `<span class="chip ok"   style="font-size:10px;padding:2px 7px">ON</span>`;
+        return `<div class="whatif-row">
+          <span class="name">${esc(c.label)} ${badge}</span>
+          <span class="reason">${esc(c.reason || "")}</span>
+          <span class="sd ${cls}">${d>=0?'+':''}${fmt(d,2)}°F</span>
+        </div>`;
+      }).join("");
+    const total = corr.total_shadow_delta_f;
+    const shadow = corr.shadow_forecast_f;
+    if (corr.enabled === false && shadow !== null && shadow !== undefined) {
+      corrSummary.style.display = "block";
+      corrSummary.innerHTML =
+        `If all corrections were re-enabled, forecast would be ` +
+        `<strong>${fmt(shadow, 1)}°F</strong> ` +
+        `(${total>=0?'+':''}${fmt(total,2)}°F vs current). ` +
+        `<span style="color:var(--muted)">Session 2 bet: suppress until ` +
+        `30+ days of attribution evidence prove each correction's value.</span>`;
+    } else {
+      corrSummary.style.display = "none";
+    }
+  } else {
+    corrRoot.innerHTML = `<div class="empty">No correction data yet.</div>`;
+    corrSummary.style.display = "none";
+  }
+
+  // What-if BMA
+  const bma = wi.bma;
+  const bmaRoot = document.getElementById("whatIfBMA");
+  if (bma && bma.shadow_forecast_f !== null && bma.shadow_forecast_f !== undefined) {
+    const d = bma.delta_vs_final_f;
+    const cls = d > 0.05 ? "pos" : (d < -0.05 ? "neg" : "");
+    bmaRoot.innerHTML = `
+      <div class="whatif-row">
+        <span class="name">BMA forecast
+          <span class="chip warn" style="font-size:10px;padding:2px 7px">OFF</span>
+        </span>
+        <span class="reason">${esc(bma.note || "")}</span>
+        <span class="sd">${fmt(bma.shadow_forecast_f,1)}°F</span>
+      </div>
+      <div class="whatif-row">
+        <span class="name">Shadow delta vs current</span>
+        <span class="reason">What BMA would shift the forecast by</span>
+        <span class="sd ${cls}">${d>=0?'+':''}${fmt(d,2)}°F</span>
+      </div>
+      <div class="whatif-row">
+        <span class="name">BMA variance</span>
+        <span class="reason">Internal uncertainty estimate</span>
+        <span class="sd">±${fmt(bma.variance_f,1)}°F</span>
+      </div>`;
+  } else {
+    bmaRoot.innerHTML = `<div class="empty">BMA not yet producing output ` +
+      `(need history to initialize).</div>`;
+  }
+
+  // Source health
+  const shRoot = document.getElementById("sourceHealth");
+  const sources = h.sources || [];
+  shRoot.innerHTML = sources.length === 0
+    ? `<div class="empty">—</div>`
+    : sources.map(s => {
+        const val = (s.value_f !== null && s.value_f !== undefined)
+          ? fmt(s.value_f, 1) + "°F" : "—";
+        const wt = s.weight_pct > 0 ? s.weight_pct + "%" : "—";
+        const nameExtra = s.name === "gfs_ensemble" && s.n_members !== undefined
+          ? ` <span style="color:var(--muted);font-size:11px">(${s.n_members}m)</span>` : "";
+        return `<div class="src-row">
+          <div class="src-dot ${s.status}"></div>
+          <div class="src-name">${esc(s.label)}${nameExtra}</div>
+          <div class="src-val">${val}</div>
+          <div class="src-wt">${wt}</div>
+          <div class="src-reason">${esc(s.status_reason || "")}</div>
+        </div>`;
+      }).join("");
+
+  // Cold start progress
+  const cs = h.cold_start || {};
+  const csRoot = document.getElementById("coldStart");
+  const csBars = [
+    { k: "kalman_verified", label: "Kalman verified" },
+    { k: "analog",          label: "Analog engine unlock" },
+    { k: "qrf",             label: "QRF training unlock" },
+  ];
+  csRoot.innerHTML = csBars.map(b => {
+    const d = cs[b.k] || {};
+    const pct = d.progress_pct || 0;
+    const txt = `${d.have || 0} / ${d.needed || 0} days`;
+    return `<div class="pb">
+      <div class="pb-label">${esc(b.label)}</div>
+      <div class="pb-track"><div class="pb-fill" style="width:${pct}%"></div></div>
+      <div class="pb-count">${txt}</div>
+    </div>`;
+  }).join("");
+
+  // InSigma box
+  const vit = h.vitals || {};
+  const inBox = document.getElementById("inSigmaBox");
+  if (vit.insigma_pct !== null && vit.insigma_pct !== undefined) {
+    inBox.style.display = "flex";
+    document.getElementById("inSigmaVal").textContent =
+      fmt(vit.insigma_pct, 0) + "%";
+    const target = vit.insigma_target_pct || 68;
+    const gap = target - vit.insigma_pct;
+    const verdict = gap > 15 ? "overconfident — intervals too tight"
+      : gap > 5 ? "slightly overconfident"
+      : gap < -10 ? "under-confident"
+      : "well-calibrated";
+    document.getElementById("inSigmaLabel").textContent =
+      `In-sigma coverage (target ${target}%) — ${verdict} · ` +
+      `${vit.insigma_samples || 0} samples`;
+  } else {
+    inBox.style.display = "none";
+  }
+
+  // Open issues + alerts (fold alerts in as low-severity)
+  const issues = (h.open_issues || []).slice();
+  (h.alerts || []).forEach(a => {
+    issues.push({ severity: "low", title: a.message, detail: a.kind });
+  });
+  const isRoot = document.getElementById("openIssues");
+  isRoot.innerHTML = issues.length === 0
+    ? `<div class="empty">No open issues. System running cleanly.</div>`
+    : issues.map(i => `
+        <div class="issue">
+          <div class="sev ${i.severity}">${esc(i.severity)}</div>
+          <div style="flex:1">
+            <div class="ti">${esc(i.title)}</div>
+            ${i.detail ? `<div class="de">${esc(i.detail)}</div>` : ""}
+          </div>
+        </div>`).join("");
+
+  // Bet scorecard — Session 2 "disable everything" bet
+  const bet = h.bet_scorecard;
+  const betRoot = document.getElementById("betScorecard");
+  if (bet && bet.gap_f !== null && bet.gap_f !== undefined) {
+    betRoot.style.display = "block";
+    let vcls = "notyet";
+    if (bet.verdict.startsWith("paying off"))    vcls = "paying";
+    else if (bet.verdict.startsWith("improving")) vcls = "improving";
+    else if (bet.verdict.startsWith("mixed"))     vcls = "mixed";
+    betRoot.innerHTML = `
+      <div class="verdict ${vcls}">Session 2 bet: ${esc(bet.verdict)}</div>
+      <div class="gap">
+        Final MAE <strong style="color:var(--text)">${fmt(bet.final_mae_f,2)}°F</strong>
+        vs Kalman MAE <strong style="color:var(--text)">${fmt(bet.kalman_mae_f,2)}°F</strong>
+        — gap <strong style="color:var(--text)">${bet.gap_f>=0?'+':''}${fmt(bet.gap_f,2)}°F</strong>
+      </div>
+      <div class="note">${esc(bet.note || "")}</div>`;
+  } else {
+    betRoot.style.display = "none";
+  }
 }
 
 async function update() {

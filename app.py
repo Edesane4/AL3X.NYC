@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 
 from al3x import config as cfg
 from al3x.ai_calibration import AICalibrator
+from al3x.health_summary import build_health_summary
 from al3x.logging_setup import configure as configure_logging
 from al3x.scheduler import AgentScheduler
 from al3x.storage import Storage
@@ -173,9 +174,48 @@ async def state():
         "weights_override": storage.get_weights(),
         "biases_override": storage.get_biases(),
     }
+    # Session 3 fix — alias keys so build_health_summary reads the
+    # same payload that's persisted to /api/state. The /api/state
+    # payload uses descriptive names; the health builder was written
+    # against shorter names. Aliasing here keeps health_summary.py
+    # pure and untouched. These aliases are additive — original keys
+    # remain available for any other consumer.
+    payload["anchor"] = payload.get("latest_today") or payload.get("latest_tomorrow")
+    payload["truth_today"] = payload.get("cli_truth_today")
+    payload["scores"] = payload.get("scores_30d") or []
+    payload["running_max_f"] = payload.get("running_max_today_f")
+    payload["now_et"] = payload.get("now")
+
+    # Session 3 — plain-English health summary derived from the
+    # payload we just built. No extra DB queries; build_health_summary
+    # is pure over payload. If the builder raises, degrade to a red
+    # status dict rather than breaking /api/state.
+    try:
+        payload["health"] = build_health_summary(payload)
+    except Exception as e:  # noqa: BLE001
+        log.exception("health_summary build failed: %s", e)
+        payload["health"] = {
+            "status": "red",
+            "headline": f"health_summary build failed: {e}",
+            "error": str(e),
+        }
     _STATE_CACHE["ts"] = now_ts
     _STATE_CACHE["payload"] = payload
     return JSONResponse(payload)
+
+
+@app.get("/api/health_summary")
+async def health_summary():
+    """Session 3 — standalone plain-English health summary.
+
+    Mirrors state["health"] so tools and terminal users can curl
+    it directly without parsing the much larger /api/state payload.
+    """
+    resp = await state()
+    import json as _json
+    body = resp.body
+    data = _json.loads(body) if isinstance(body, (bytes, bytearray)) else body
+    return JSONResponse(data.get("health") or {})
 
 
 @app.get("/api/history")
