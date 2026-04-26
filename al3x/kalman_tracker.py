@@ -39,6 +39,15 @@ def _parse_dt(iso_ts: str) -> Optional[datetime]:
         return None
 
 
+def _approx_sunrise_hour(month: int) -> float:
+    """Approximate civil sunrise hour (Eastern, decimal) for KNYC.
+    Good to ±30 min; sufficient for blend_weight gating."""
+    # Apr-Sep: ~5:30–6:30 AM. Oct-Mar: ~6:30–7:15 AM.
+    if 4 <= month <= 9:
+        return 6.0
+    return 7.0
+
+
 def project_daily_max(obs_today: List[Dict[str, Any]],
                        hrrr_hourly: Optional[Sequence[Tuple[float, float]]],
                        running_max_f: Optional[float],
@@ -131,6 +140,23 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
         rate = alpha * rate + (1 - alpha) * float(prior_rate)
         prior_used = True
 
+    # Fix A (Session 4) — refuse to project a meaningless daily-max when
+    # Kalman's measured rate is non-positive and we're still pre-peak with
+    # no observational evidence of warming. Bug from 2026-04-26 5:42 AM:
+    # rate = -0.10°F/hr (still cooling toward dawn), projection collapsed
+    # to current_temp (42°F), HRRR ceiling pulled it to 45.9°F, Kalman
+    # got 35% weight on a day heading toward 55°F. Returning None lets
+    # the ensemble re-normalize across the remaining sources.
+    if (rate <= 0
+            and current_hour < 13.0
+            and (running_max_f is None
+                 or hrrr_peak_f is None
+                 or running_max_f < float(hrrr_peak_f))):
+        log.info("Kalman declining to project: rate=%.2f°F/hr at hour=%.2f, "
+                 "running_max=%s, hrrr_peak=%s — insufficient daytime signal",
+                 rate, current_hour, running_max_f, hrrr_peak_f)
+        return None
+
     # Projection rule:
     #  - rate>0 and haven't hit peak: linearly extrapolate
     #  - rate<=0 and past 1 PM: use running_max as the projected peak
@@ -156,9 +182,20 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
     if running_max_f is not None:
         projected = max(projected, running_max_f)
 
-    if hours_of_data < 4.0:
+    # Fix B (Session 4) — blend_weight gated on POST-SUNRISE hours, not raw
+    # wall-clock observation hours. Pre-dawn observations have no signal
+    # about today's peak; Kalman shouldn't get 35% ensemble weight just
+    # because the agent has been collecting flat overnight readings since
+    # midnight. See bug from 2026-04-26 5:42 AM where hours_of_data=4.32
+    # bumped weight to 0.35 with zero useful daytime data.
+    sunrise_hour = _approx_sunrise_hour(now.month)
+    useful_daytime_hours = max(0.0, current_hour - sunrise_hour)
+
+    if useful_daytime_hours < 2.0:
+        blend_weight = 0.05  # Kalman has no useful daytime data yet
+    elif useful_daytime_hours < 4.0:
         blend_weight = 0.15
-    elif hours_of_data < 8.0:
+    elif useful_daytime_hours < 8.0:
         blend_weight = 0.35
     else:
         blend_weight = 0.55
@@ -167,6 +204,7 @@ def project_daily_max(obs_today: List[Dict[str, Any]],
         "projected_max_f": float(projected),
         "kalman_uncertainty_f": float(uncertainty),
         "hours_of_data_used": round(hours_of_data, 2),
+        "useful_daytime_hours": round(useful_daytime_hours, 2),
         "blend_weight": blend_weight,
         "current_temp_f": float(temp),
         "rate_f_per_hr": float(rate),
