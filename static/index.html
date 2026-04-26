@@ -179,6 +179,192 @@
   .stat .v { font-size: 22px; font-weight: 700; }
   .stat .l { color: var(--muted); font-size: 11px; text-transform: uppercase;
              letter-spacing: 0.1em; margin-top: 4px; }
+
+  /* Session 3 — plain-English health strip */
+  .health-strip {
+    grid-column: span 2;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 18px; align-items: center;
+  }
+  @media (max-width: 960px) {
+    .health-strip { grid-template-columns: 1fr; grid-column: auto; }
+  }
+  .traffic-light {
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 6px; min-width: 110px;
+  }
+  .traffic-dot {
+    width: 52px; height: 52px; border-radius: 50%;
+    box-shadow: 0 0 0 6px rgba(255,255,255,0.04),
+                inset 0 -8px 16px rgba(0,0,0,0.35);
+  }
+  .traffic-dot.green  { background: radial-gradient(circle at 35% 30%, #a7ff9c, #21b34a);
+                        box-shadow: 0 0 24px rgba(88,226,125,0.55),
+                                    inset 0 -8px 16px rgba(0,0,0,0.35); }
+  .traffic-dot.yellow { background: radial-gradient(circle at 35% 30%, #ffe491, #e2a20a);
+                        box-shadow: 0 0 24px rgba(255,207,91,0.55),
+                                    inset 0 -8px 16px rgba(0,0,0,0.35); }
+  .traffic-dot.red    { background: radial-gradient(circle at 35% 30%, #ff9d9d, #cc2323);
+                        box-shadow: 0 0 24px rgba(255,110,110,0.55),
+                                    inset 0 -8px 16px rgba(0,0,0,0.35); }
+  .traffic-label {
+    text-transform: uppercase; letter-spacing: 0.14em;
+    font-size: 11px; font-weight: 700; color: var(--muted);
+  }
+  .health-text .headline {
+    font-size: 20px; font-weight: 600; line-height: 1.3;
+    margin-bottom: 6px;
+  }
+  .health-text .narrative {
+    color: var(--muted); font-size: 14px; line-height: 1.55;
+  }
+
+  /* Countdowns */
+  .countdowns {
+    display: grid; grid-template-columns: repeat(4, 1fr);
+    gap: 10px; margin-top: 14px;
+  }
+  @media (max-width: 720px) {
+    .countdowns { grid-template-columns: repeat(2, 1fr); }
+  }
+  .cd {
+    padding: 10px 12px; border: 1px solid var(--border);
+    border-radius: 10px; background: rgba(255,255,255,0.02);
+  }
+  .cd .lbl {
+    color: var(--muted); font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.12em; font-weight: 600;
+  }
+  .cd .val {
+    font-variant-numeric: tabular-nums; font-size: 18px;
+    font-weight: 600; margin-top: 4px;
+  }
+  .cd.hot .val  { color: var(--warm); }
+  .cd.live .val { color: var(--ok); }
+
+  /* What-If panel */
+  .whatif-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 10px 0; border-bottom: 1px dashed var(--border); gap: 10px;
+  }
+  .whatif-row:last-child { border-bottom: none; }
+  .whatif-row .name   { color: var(--text); font-size: 13px; flex: 0 0 auto; }
+  .whatif-row .reason { color: var(--muted); font-size: 11px; flex: 1;
+                        padding-left: 10px; }
+  .whatif-row .sd {
+    font-variant-numeric: tabular-nums; font-weight: 600;
+    font-size: 13px; min-width: 70px; text-align: right;
+  }
+  .whatif-row .sd.pos { color: var(--warm); }
+  .whatif-row .sd.neg { color: var(--cool); }
+  .whatif-summary {
+    margin-top: 14px; padding: 12px;
+    border-radius: 10px; background: rgba(95,184,255,0.06);
+    border: 1px solid rgba(95,184,255,0.22);
+    font-size: 13px; line-height: 1.5;
+  }
+  .whatif-summary strong { color: var(--accent); }
+
+  /* Source health rows */
+  .src-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 0; font-size: 13px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .src-row:last-child { border-bottom: none; }
+  .src-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; }
+  .src-dot.green  { background: var(--ok);   box-shadow: 0 0 8px rgba(88,226,125,0.6); }
+  .src-dot.yellow { background: var(--warn); box-shadow: 0 0 8px rgba(255,207,91,0.5); }
+  .src-dot.red    { background: var(--err);  box-shadow: 0 0 8px rgba(255,110,110,0.5); }
+  .src-name   { flex: 0 0 155px; color: var(--text); font-weight: 500; }
+  .src-val    { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 55px; }
+  .src-wt     { font-variant-numeric: tabular-nums; color: var(--muted);
+                min-width: 38px; text-align: right; font-size: 12px; }
+  .src-reason { color: var(--muted); font-size: 11px; flex: 1; text-align: right; }
+
+  /* Cold-start progress bars */
+  .pb {
+    display: flex; align-items: center; gap: 12px; padding: 10px 0;
+    border-bottom: 1px dashed var(--border);
+  }
+  .pb:last-child { border-bottom: none; }
+  .pb .pb-label { flex: 0 0 125px; color: var(--muted); font-size: 12px; }
+  .pb .pb-track {
+    flex: 1; height: 8px; background: rgba(255,255,255,0.05);
+    border-radius: 999px; overflow: hidden; position: relative;
+  }
+  .pb .pb-fill {
+    position: absolute; left: 0; top: 0; height: 100%;
+    background: linear-gradient(90deg, #4ea3ff 0%, #58e27d 100%);
+    border-radius: 999px; transition: width 0.6s ease;
+  }
+  .pb .pb-count {
+    font-variant-numeric: tabular-nums; color: var(--text); font-size: 12px;
+    flex: 0 0 auto; min-width: 72px; text-align: right;
+  }
+
+  /* Open issues */
+  .issue {
+    display: flex; align-items: flex-start; gap: 12px;
+    padding: 10px 0; border-bottom: 1px dashed var(--border);
+  }
+  .issue:last-child { border-bottom: none; }
+  .sev {
+    flex: 0 0 56px; font-size: 10px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    padding: 3px 7px; border-radius: 6px; text-align: center;
+  }
+  .sev.high   { background: rgba(255,110,110,0.15); color: var(--err);
+                border: 1px solid rgba(255,110,110,0.35); }
+  .sev.medium { background: rgba(255,207,91,0.15); color: var(--warn);
+                border: 1px solid rgba(255,207,91,0.35); }
+  .sev.low    { background: rgba(95,184,255,0.12); color: var(--accent);
+                border: 1px solid rgba(95,184,255,0.28); }
+  .issue .ti { font-size: 13px; font-weight: 500; }
+  .issue .de { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+  /* Bet scorecard */
+  .bet {
+    padding: 14px; border-radius: 12px;
+    background: linear-gradient(135deg, rgba(95,184,255,0.06), rgba(106,255,208,0.04));
+    border: 1px solid rgba(95,184,255,0.25);
+    margin-top: 14px;
+  }
+  .bet .verdict { font-weight: 700; font-size: 15px; color: var(--accent);
+                  margin-bottom: 6px; }
+  .bet .verdict.paying    { color: var(--ok); }
+  .bet .verdict.improving { color: var(--accent); }
+  .bet .verdict.mixed     { color: var(--warn); }
+  .bet .verdict.notyet    { color: var(--err); }
+  .bet .gap {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+    font-size: 12px; color: var(--muted); margin-top: 6px;
+  }
+  .bet .note { color: var(--muted); font-size: 12px; margin-top: 8px;
+               line-height: 1.5; }
+
+  /* InSigma callout */
+  .insigma {
+    display: flex; align-items: center; gap: 10px; margin-top: 8px;
+    padding: 10px; background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border); border-radius: 10px;
+  }
+  .insigma .v {
+    font-variant-numeric: tabular-nums; font-weight: 700;
+    font-size: 20px; color: var(--warn); min-width: 60px;
+  }
+  .insigma .l { color: var(--muted); font-size: 12px; }
+
+  /* Regime narrator */
+  .regime-narr {
+    padding: 10px 12px; border-radius: 10px;
+    background: rgba(95,184,255,0.04);
+    border: 1px solid rgba(95,184,255,0.15);
+    font-size: 13px; line-height: 1.5; color: var(--text);
+    margin-bottom: 14px;
+  }
+  .regime-narr strong { color: var(--accent); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -198,6 +384,62 @@
 </header>
 
 <main>
+  <!-- Session 3 — Health at a glance (plain English) -->
+  <section class="card health-strip">
+    <div class="traffic-light">
+      <div class="traffic-dot green" id="trafficDot"></div>
+      <div class="traffic-label" id="trafficLabel">BOOTING</div>
+    </div>
+    <div class="health-text">
+      <div class="headline" id="healthHeadline">Waiting for first cycle…</div>
+      <div class="narrative" id="healthNarrative">—</div>
+      <div class="countdowns" id="countdowns"></div>
+    </div>
+  </section>
+
+  <!-- Session 3 — Regime + What-If -->
+  <section class="card" style="grid-column: span 2">
+    <h2>Forecast context — what's happening and what's being suppressed</h2>
+    <div class="regime-narr" id="regimeNarr">—</div>
+    <div class="twocol">
+      <div>
+        <h2 style="margin-top:0">What-if: corrections</h2>
+        <div id="whatIfCorrections">
+          <div class="empty">—</div>
+        </div>
+        <div class="whatif-summary" id="whatIfCorrSummary" style="display:none"></div>
+      </div>
+      <div>
+        <h2 style="margin-top:0">What-if: BMA</h2>
+        <div id="whatIfBMA">
+          <div class="empty">—</div>
+        </div>
+      </div>
+    </div>
+    <div class="bet" id="betScorecard" style="display:none"></div>
+  </section>
+
+  <!-- Session 3 — Source health + Cold start -->
+  <section class="card">
+    <h2>Source health</h2>
+    <div id="sourceHealth"><div class="empty">—</div></div>
+  </section>
+
+  <section class="card">
+    <h2>Cold-start progress (evidence accumulating)</h2>
+    <div id="coldStart"><div class="empty">—</div></div>
+    <div class="insigma" id="inSigmaBox" style="display:none">
+      <div class="v" id="inSigmaVal">—</div>
+      <div class="l" id="inSigmaLabel">—</div>
+    </div>
+  </section>
+
+  <!-- Session 3 — Open issues + alerts -->
+  <section class="card" style="grid-column: span 2">
+    <h2>Open issues &amp; alerts</h2>
+    <div id="openIssues"><div class="empty">No open issues.</div></div>
+  </section>
+
   <!-- Hero cards: today + tomorrow -->
   <section class="card hero">
     <div>
