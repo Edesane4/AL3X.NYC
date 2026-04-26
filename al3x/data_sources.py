@@ -528,16 +528,22 @@ class DataSources:
         ``temperature_2m_member01`` ... ``temperature_2m_memberNN``.
         """
         try:
+            # Session 5 Part 1 — corrected to use the /v1/ensemble endpoint
+            # and the gfs05 model name (the GEFS 0.5° grid that natively
+            # serves perturbed members as temperature_2m_memberNN). The
+            # previous code called /v1/forecast with `ensemble=true`, which
+            # is a parameter that endpoint silently ignores; response always
+            # returned just the control series. Verified against live API
+            # on 2026-04-26.
             params = {
                 "latitude": cfg.LAT, "longitude": cfg.LON,
                 "hourly": "temperature_2m",
-                "models": "gfs_seamless",
+                "models": "gfs05",
                 "temperature_unit": "fahrenheit",
                 "timezone": "America/New_York",
                 "forecast_days": 3,
-                "ensemble": "true",
             }
-            r = await self._client.get(cfg.OPEN_METEO, params=params,
+            r = await self._client.get(cfg.OPEN_METEO_ENSEMBLE, params=params,
                                        timeout=25.0)
             r.raise_for_status()
             js = r.json()
