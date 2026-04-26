@@ -579,6 +579,9 @@ function render(state) {
   document.getElementById("lastUpdated").textContent =
     "updated " + new Date().toLocaleTimeString("en-US");
 
+  // Session 3 — render plain-English health first
+  if (state.health) renderHealth(state.health);
+
   document.getElementById("todayDate").textContent = state.target_today;
   document.getElementById("tomorrowDate").textContent = state.target_tomorrow;
 
@@ -744,12 +747,230 @@ function render(state) {
 function prettySource(k) {
   return { hrrr: "HRRR (3 km)", nws_point: "NWS Point Forecast",
     gfs_mos: "GFS-MOS", nam_mos: "NAM-MOS", ecmwf: "ECMWF",
-    nbm: "NBM", asos_trend: "KNYC ASOS trend" }[k] || k;
+    nbm: "NBM", asos_trend: "KNYC ASOS trend",
+    kalman: "Kalman projection", gfs_ensemble: "GEFS ensemble" }[k] || k;
 }
 function prettyCorrection(k) {
   return { sea_breeze: "Sea breeze", uhi: "Urban heat island",
     cloud_timing: "Cloud timing", precip: "Precipitation",
     inversion: "Inversion / fog", spread_penalty: "Model spread" }[k] || k;
+}
+
+// ---- Session 3 — plain-English health renderer ------------------------
+
+function fmtDur(sec) {
+  if (sec === null || sec === undefined) return "—";
+  if (sec <= 0) return "now";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function renderHealth(h) {
+  if (!h) return;
+
+  // Traffic light
+  const dot = document.getElementById("trafficDot");
+  dot.classList.remove("green", "yellow", "red");
+  dot.classList.add(h.status || "yellow");
+  document.getElementById("trafficLabel").textContent =
+    (h.status || "unknown").toUpperCase();
+  document.getElementById("healthHeadline").textContent = h.headline || "—";
+  document.getElementById("healthNarrative").textContent =
+    h.forecast_narrative || "—";
+
+  // Countdowns
+  const cd = h.countdowns || {};
+  const cdRoot = document.getElementById("countdowns");
+  const cdItems = [
+    { lbl: "Next intraday", sec: cd.next_intraday_in_sec,
+      hot: cd.next_intraday_in_sec !== undefined && cd.next_intraday_in_sec < 120 },
+    { lbl: cd.cli_window_open ? "CLI window OPEN" : "CLI window opens",
+      sec: cd.next_cli_in_sec,
+      live: cd.cli_window_open },
+    { lbl: "Morning brief", sec: cd.next_morning_in_sec,
+      hot: cd.next_morning_in_sec !== undefined && cd.next_morning_in_sec < 3600 },
+    { lbl: "Night-before", sec: cd.next_night_before_in_sec },
+  ];
+  cdRoot.innerHTML = cdItems.map(i => {
+    const cls = i.live ? "live" : (i.hot ? "hot" : "");
+    return `<div class="cd ${cls}">
+      <div class="lbl">${esc(i.lbl)}</div>
+      <div class="val">${fmtDur(i.sec)}</div>
+    </div>`;
+  }).join("");
+
+  // Regime narrative
+  document.getElementById("regimeNarr").innerHTML =
+    `<strong>Context:</strong> ${esc(h.regime_narrative || "—")}`;
+
+  // What-if corrections
+  const wi = h.what_if || {};
+  const corr = wi.corrections;
+  const corrRoot = document.getElementById("whatIfCorrections");
+  const corrSummary = document.getElementById("whatIfCorrSummary");
+  const perList = corr ? (corr.per_correction || corr.per || []) : [];
+  if (corr && perList.length) {
+    corrRoot.innerHTML = perList
+      .filter(c => c.name !== "spread_penalty")
+      .map(c => {
+        const d = c.shadow_delta_f;
+        const cls = d > 0.05 ? "pos" : (d < -0.05 ? "neg" : "");
+        const badge = c.suppressed
+          ? `<span class="chip warn" style="font-size:10px;padding:2px 7px">OFF</span>`
+          : `<span class="chip ok"   style="font-size:10px;padding:2px 7px">ON</span>`;
+        return `<div class="whatif-row">
+          <span class="name">${esc(c.label)} ${badge}</span>
+          <span class="reason">${esc(c.reason || "")}</span>
+          <span class="sd ${cls}">${d>=0?'+':''}${fmt(d,2)}°F</span>
+        </div>`;
+      }).join("");
+    const total = corr.total_shadow_delta_f;
+    const shadow = corr.shadow_forecast_f;
+    if (corr.enabled === false && shadow !== null && shadow !== undefined) {
+      corrSummary.style.display = "block";
+      corrSummary.innerHTML =
+        `If all corrections were re-enabled, forecast would be ` +
+        `<strong>${fmt(shadow, 1)}°F</strong> ` +
+        `(${total>=0?'+':''}${fmt(total,2)}°F vs current). ` +
+        `<span style="color:var(--muted)">Session 2 bet: suppress until ` +
+        `30+ days of attribution evidence prove each correction's value.</span>`;
+    } else {
+      corrSummary.style.display = "none";
+    }
+  } else {
+    corrRoot.innerHTML = `<div class="empty">No correction data yet.</div>`;
+    corrSummary.style.display = "none";
+  }
+
+  // What-if BMA
+  const bma = wi.bma;
+  const bmaRoot = document.getElementById("whatIfBMA");
+  if (bma && bma.shadow_forecast_f !== null && bma.shadow_forecast_f !== undefined) {
+    const d = bma.delta_vs_final_f;
+    const cls = d > 0.05 ? "pos" : (d < -0.05 ? "neg" : "");
+    bmaRoot.innerHTML = `
+      <div class="whatif-row">
+        <span class="name">BMA forecast
+          <span class="chip warn" style="font-size:10px;padding:2px 7px">OFF</span>
+        </span>
+        <span class="reason">${esc(bma.note || "")}</span>
+        <span class="sd">${fmt(bma.shadow_forecast_f,1)}°F</span>
+      </div>
+      <div class="whatif-row">
+        <span class="name">Shadow delta vs current</span>
+        <span class="reason">What BMA would shift the forecast by</span>
+        <span class="sd ${cls}">${d>=0?'+':''}${fmt(d,2)}°F</span>
+      </div>
+      <div class="whatif-row">
+        <span class="name">BMA variance</span>
+        <span class="reason">Internal uncertainty estimate</span>
+        <span class="sd">±${fmt(bma.variance_f,1)}°F</span>
+      </div>`;
+  } else {
+    bmaRoot.innerHTML = `<div class="empty">BMA not yet producing output ` +
+      `(need history to initialize).</div>`;
+  }
+
+  // Source health
+  const shRoot = document.getElementById("sourceHealth");
+  const sources = h.sources || [];
+  shRoot.innerHTML = sources.length === 0
+    ? `<div class="empty">—</div>`
+    : sources.map(s => {
+        const val = (s.value_f !== null && s.value_f !== undefined)
+          ? fmt(s.value_f, 1) + "°F" : "—";
+        const wt = s.weight_pct > 0 ? s.weight_pct + "%" : "—";
+        const nameExtra = s.name === "gfs_ensemble" && s.n_members !== undefined
+          ? ` <span style="color:var(--muted);font-size:11px">(${s.n_members}m)</span>` : "";
+        return `<div class="src-row">
+          <div class="src-dot ${s.status}"></div>
+          <div class="src-name">${esc(s.label)}${nameExtra}</div>
+          <div class="src-val">${val}</div>
+          <div class="src-wt">${wt}</div>
+          <div class="src-reason">${esc(s.status_reason || "")}</div>
+        </div>`;
+      }).join("");
+
+  // Cold start progress
+  const cs = h.cold_start || {};
+  const csRoot = document.getElementById("coldStart");
+  const csBars = [
+    { k: "kalman_verified", label: "Kalman verified" },
+    { k: "analog",          label: "Analog engine unlock" },
+    { k: "qrf",             label: "QRF training unlock" },
+  ];
+  csRoot.innerHTML = csBars.map(b => {
+    const d = cs[b.k] || {};
+    const pct = d.progress_pct || 0;
+    const txt = `${d.have || 0} / ${d.needed || 0} days`;
+    return `<div class="pb">
+      <div class="pb-label">${esc(b.label)}</div>
+      <div class="pb-track"><div class="pb-fill" style="width:${pct}%"></div></div>
+      <div class="pb-count">${txt}</div>
+    </div>`;
+  }).join("");
+
+  // InSigma box
+  const vit = h.vitals || {};
+  const inBox = document.getElementById("inSigmaBox");
+  if (vit.insigma_pct !== null && vit.insigma_pct !== undefined) {
+    inBox.style.display = "flex";
+    document.getElementById("inSigmaVal").textContent =
+      fmt(vit.insigma_pct, 0) + "%";
+    const target = vit.insigma_target_pct || 68;
+    const gap = target - vit.insigma_pct;
+    const verdict = gap > 15 ? "overconfident — intervals too tight"
+      : gap > 5 ? "slightly overconfident"
+      : gap < -10 ? "under-confident"
+      : "well-calibrated";
+    document.getElementById("inSigmaLabel").textContent =
+      `In-sigma coverage (target ${target}%) — ${verdict} · ` +
+      `${vit.insigma_samples || 0} samples`;
+  } else {
+    inBox.style.display = "none";
+  }
+
+  // Open issues + alerts (fold alerts in as low-severity)
+  const issues = (h.open_issues || []).slice();
+  (h.alerts || []).forEach(a => {
+    issues.push({ severity: "low", title: a.message, detail: a.kind });
+  });
+  const isRoot = document.getElementById("openIssues");
+  isRoot.innerHTML = issues.length === 0
+    ? `<div class="empty">No open issues. System running cleanly.</div>`
+    : issues.map(i => `
+        <div class="issue">
+          <div class="sev ${i.severity}">${esc(i.severity)}</div>
+          <div style="flex:1">
+            <div class="ti">${esc(i.title)}</div>
+            ${i.detail ? `<div class="de">${esc(i.detail)}</div>` : ""}
+          </div>
+        </div>`).join("");
+
+  // Bet scorecard — Session 2 "disable everything" bet
+  const bet = h.bet_scorecard;
+  const betRoot = document.getElementById("betScorecard");
+  if (bet && bet.gap_f !== null && bet.gap_f !== undefined) {
+    betRoot.style.display = "block";
+    let vcls = "notyet";
+    if (bet.verdict.startsWith("paying off"))    vcls = "paying";
+    else if (bet.verdict.startsWith("improving")) vcls = "improving";
+    else if (bet.verdict.startsWith("mixed"))     vcls = "mixed";
+    betRoot.innerHTML = `
+      <div class="verdict ${vcls}">Session 2 bet: ${esc(bet.verdict)}</div>
+      <div class="gap">
+        Final MAE <strong style="color:var(--text)">${fmt(bet.final_mae_f,2)}°F</strong>
+        vs Kalman MAE <strong style="color:var(--text)">${fmt(bet.kalman_mae_f,2)}°F</strong>
+        — gap <strong style="color:var(--text)">${bet.gap_f>=0?'+':''}${fmt(bet.gap_f,2)}°F</strong>
+      </div>
+      <div class="note">${esc(bet.note || "")}</div>`;
+  } else {
+    betRoot.style.display = "none";
+  }
 }
 
 async function update() {
