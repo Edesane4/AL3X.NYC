@@ -33,7 +33,19 @@ MDL_NAMMOS = "https://mdl.nws.noaa.gov/api/product/nammos/"
 # ensemble re-weights across the remaining sources.
 GFS_MOS_URL = ("https://mesonet.agron.iastate.edu/api/1/mos.txt"
                f"?station={STATION_ID}&model=GFS")
+# Open-Meteo deterministic forecast endpoint (single-model, no members).
+# Used by HRRR + ECMWF via DataSources.open_meteo().
 OPEN_METEO = "https://api.open-meteo.com/v1/forecast"
+
+# Open-Meteo ENSEMBLE endpoint (members per model).
+# Used by DataSources.gfs_ensemble_spread() to fetch GEFS perturbed runs.
+# Different endpoint, different model naming convention. The deterministic
+# `/v1/forecast` endpoint silently ignores the `ensemble` parameter and
+# returns a single series — that was the Session 5 Part 1 bug.
+# Note: Open-Meteo serves the ensemble API on a dedicated subdomain
+# (ensemble-api.open-meteo.com), NOT under api.open-meteo.com — the
+# latter returns 404 for /v1/ensemble regardless of model name.
+OPEN_METEO_ENSEMBLE = "https://ensemble-api.open-meteo.com/v1/ensemble"
 NWS_CLI = (
     "https://forecast.weather.gov/product.php"
     f"?site={WFO}&issuedby=NYC&product=CLI&format=CI&version=1&glossary=0"
