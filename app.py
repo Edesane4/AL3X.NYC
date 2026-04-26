@@ -147,6 +147,30 @@ async def state():
     except Exception:
         qrf_stats = None
 
+    # Session 4 Part 4 — surface climatology readiness so we can tell
+    # whether Kalman's prior_rate is engaged. The 2026-04-26 5:42 AM bug
+    # had prior_rate_used=false; without surfacing readiness state we
+    # can't distinguish "not built yet" from "built but no bin matches
+    # today's weather conditions".
+    clim_state = None
+    try:
+        clim = getattr(app.state.agent.forecaster, "_clim", None)
+        built_date = getattr(app.state.agent.forecaster,
+                              "_clim_built_date", None)
+        if clim is not None:
+            s = clim.stats()
+            clim_state = {
+                "ready": bool(s.get("ready")),
+                "num_bins": s.get("num_bins"),
+                "fallback_mean_f_per_hr": s.get("fallback_mean"),
+                "last_built_date": (built_date.isoformat()
+                                     if built_date else None),
+                "sample_counts": s.get("sample_counts") or {},
+            }
+    except Exception as e:  # noqa: BLE001
+        log.info("climatology readiness probe failed: %s", e)
+        clim_state = {"ready": False, "error": str(e)}
+
     # Running max from obs
     running_max_f = None
     if obs:
@@ -169,6 +193,7 @@ async def state():
         "attribution": attribution,
         "regime_shifts": regime_shifts,
         "qrf_calibration": qrf_stats,
+        "climatology": clim_state,
         "ai_enabled": bool(getattr(app.state, "ai_calibrator", None)
                            and app.state.ai_calibrator.enabled),
         "weights_override": storage.get_weights(),
