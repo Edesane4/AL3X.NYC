@@ -518,6 +518,54 @@ class AgentScheduler:
     async def retune_weights(self) -> None:
         res = self.learning.retune_weights()
         log.info("Weekly weight retune: %s", res)
+
+        # Session 4 Part 4 — BMA-learned-bias-vs-actual-7d-mean-error log
+        # line. Without this, we can't track whether the +5°F phantom
+        # Kalman bias BMA learned (per morning.txt 2026-04-26) is
+        # shrinking. One greppable line per source per weekly retune is
+        # enough to build the trend.
+        try:
+            last_fc = self.storage.latest_forecast()
+            bma = ((last_fc.get("extras") or {}).get("bma")
+                   if last_fc else None) or {}
+            bma_biases = bma.get("source_biases") or {}
+
+            scores = self.storage.recent_scores(days=7)
+            by_source_err: dict = {}
+            for s in scores:
+                truth = self.storage.get_cli_truth(s["target_date"])
+                if not truth:
+                    continue
+                fcs = self.storage.forecasts_for_date(s["target_date"])
+                if not fcs:
+                    continue
+                fc = fcs[-1]
+                cli = float(truth["recorded_high_f"])
+                for name, payload in (fc.get("sources") or {}).items():
+                    v = payload.get("value")
+                    if v is None:
+                        continue
+                    by_source_err.setdefault(name, []).append(cli - float(v))
+
+            actual_mean_err = {k: round(sum(v) / len(v), 2)
+                                for k, v in by_source_err.items() if v}
+
+            for src in sorted(set(bma_biases) | set(actual_mean_err)):
+                bma_b = bma_biases.get(src)
+                act_b = actual_mean_err.get(src)
+                n_actual = len(by_source_err.get(src) or [])
+                if bma_b is None and act_b is None:
+                    continue
+                log.info(
+                    "BMA_BIAS_TREND src=%s bma_learned=%s actual_7d=%s n=%d",
+                    src,
+                    f"{bma_b:+.2f}" if bma_b is not None else "n/a",
+                    f"{act_b:+.2f}" if act_b is not None else "n/a",
+                    n_actual,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.info("BMA bias trend log failed: %s", e)
+
         # FIX 5 — piggy-back on the weekly cron to prune old
         # night_before_runs rows (keep 7 days).
         try:
