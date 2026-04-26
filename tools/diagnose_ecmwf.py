@@ -1,10 +1,12 @@
-"""FIX 4 — ECMWF availability diagnostic.
+"""ECMWF availability diagnostic.
 
-Evidence: live availability 0/200. Every call to
-``DataSources.ecmwf`` returns "no target-date hours", meaning the
-Open-Meteo hourly payload contains zero entries whose .date() matches
-the target. Possible causes include model ID rename, timezone shift,
-or a parameter change upstream.
+Updated Session 5 Part 2: was probing ecmwf_ifs04 which returns null
+payloads (200 OK but every temperature_2m entry is null, which the
+app's open_meteo() filter collapses to "no target-date hours"). Now
+probes ecmwf_ifs025, the canonical IFS 0.25° successor and the model
+id production uses post-fix. The diagnostic logic is otherwise
+unchanged so this script remains useful for catching future ECMWF
+availability regressions.
 
 This script makes a raw HTTPS call with the exact parameters the app
 uses (from al3x/config.py) and prints the response structure so the
@@ -66,7 +68,7 @@ def main() -> int:
         "latitude": cfg.LAT,
         "longitude": cfg.LON,
         "hourly": "temperature_2m",
-        "models": "ecmwf_ifs04",
+        "models": "ecmwf_ifs025",
         "temperature_unit": "fahrenheit",
         "timezone": "America/New_York",
         "forecast_days": 3,
@@ -146,7 +148,7 @@ def main() -> int:
         print()
         print("⚠️  target date has NO entries in the response. This is "
               "the live failure mode. Cross-check:")
-        print("    * model id: is 'ecmwf_ifs04' still served?")
+        print("    * model id: is 'ecmwf_ifs025' still served?")
         print("    * timezone: did entries come back in UTC rather than "
               "America/New_York?")
         print("    * forecast_days: is the horizon shorter than expected?")
