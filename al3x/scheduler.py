@@ -450,6 +450,18 @@ class AgentScheduler:
                                     cli["posted_at"], cli["raw_text"])
         self._cli_verified_for.add(target_date)
 
+        # Session 6 Part 3 — record whether realized truth fell inside
+        # the agent's stated 80% band. Observability only; never block
+        # production verification on calibration recording errors.
+        try:
+            from al3x.calibration import record_calibration
+            with self.storage._conn() as cal_conn:
+                record_calibration(cal_conn, target_date,
+                                   float(cli["recorded_high_f"]))
+        except Exception as e:  # noqa: BLE001
+            log.warning("calibration recording failed for %s: %s",
+                        target_date, e)
+
         # Score the forecasts that were issued for this target date
         result = self.learning.score_day(target_date, cli["recorded_high_f"])
         latest = self.storage.latest_forecast(target_date)
