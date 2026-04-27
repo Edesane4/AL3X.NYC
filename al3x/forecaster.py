@@ -7,6 +7,7 @@ a dict suitable for persistence and Telegram formatting.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,6 +18,59 @@ from .data_sources import DataSources, SourceResult, running_max
 from .quantile_forest import QuantileForest, _feature_vector as _qrf_fv
 
 log = logging.getLogger("al3x.forecaster")
+
+# z-score for the 80% central interval (10th/90th percentiles of standard normal)
+_Z_80 = 1.2816
+
+
+def _compute_forecast_bands(
+    final_f: float,
+    gefs_sigma: Optional[float],
+    contributing_sources: List[Tuple[str, float, float]],
+) -> Dict[str, Any]:
+    """Compute P10/P50/P90 bands for the agent's blended forecast.
+
+    Variance decomposition combines two independent uncertainty sources:
+      - GEFS member spread (initial-condition epistemic uncertainty)
+      - Across-model disagreement (model-physics epistemic uncertainty)
+
+    sigma_total = sqrt(sigma_gefs**2 + sigma_model_disagreement**2)
+
+    contributing_sources is a list of (name, value, weight) tuples for
+    sources that contributed to final_f. We exclude gfs_ensemble from
+    the disagreement calculation to avoid double-counting GEFS spread.
+
+    Returns a dict suitable for attaching to extras["bands"].
+    """
+    gefs_var = (gefs_sigma ** 2) if (gefs_sigma is not None and gefs_sigma > 0) else 0.0
+
+    contributors = [
+        (v, w) for (name, v, w) in contributing_sources
+        if v is not None and w > 0 and name != "gfs_ensemble"
+    ]
+    model_disagreement_var = 0.0
+    if len(contributors) >= 2:
+        total_w = sum(w for _, w in contributors)
+        if total_w > 0:
+            wmean = sum(v * w for v, w in contributors) / total_w
+            model_disagreement_var = (
+                sum(w * (v - wmean) ** 2 for v, w in contributors) / total_w
+            )
+
+    sigma_total = math.sqrt(gefs_var + model_disagreement_var)
+    sigma_total = max(0.5, sigma_total)
+
+    return {
+        "p10": round(final_f - _Z_80 * sigma_total, 2),
+        "p50": round(final_f, 2),
+        "p90": round(final_f + _Z_80 * sigma_total, 2),
+        "sigma_f": round(sigma_total, 2),
+        "sigma_components": {
+            "gefs": round(float(gefs_sigma), 2) if gefs_sigma else None,
+            "model_disagreement": round(math.sqrt(model_disagreement_var), 2),
+        },
+        "method": "gaussian_variance_decomposition_v1",
+    }
 
 # Session 2 — hoisted from inline definitions inside produce(). Caps
 # the effective Kalman weight so post-mean re-normalization can't push
@@ -1076,8 +1130,10 @@ class Forecaster:
             # Half of the 80% prediction interval ≈ 1-sigma for a
             # roughly-symmetric residual distribution.
             uncertainty = max(0.5, qrf_result["interval_width"] / 2.0)
-        elif gefs_sigma is not None:
-            uncertainty = max(0.5, gefs_sigma)
+        # Session 6 — sigma_total via variance decomposition is now the
+        # primary uncertainty estimate when QRF hasn't trained yet.
+        # Falls through to heuristic only when both QRF and GEFS are
+        # missing.
         # Session 2 — BMA variance no longer contributes to uncertainty
         # because BMA output is disabled. Re-enable alongside BMA output.
         # elif bma_result is not None:
@@ -1157,6 +1213,30 @@ class Forecaster:
         except Exception as e:  # noqa: BLE001
             log.info("persistence sanity check skipped: %s", e)
 
+        # Session 6 Part 1 — probabilistic bands via variance
+        # decomposition. Combines GEFS member spread (initial-condition
+        # uncertainty) and across-model disagreement (model-physics
+        # uncertainty) into sigma_total. Excludes gfs_ensemble from
+        # disagreement to avoid double-counting GEFS spread. Bands are
+        # additive to extras; uncertainty_f is re-derived from
+        # sigma_total for back-compat.
+        contributing_sources = [
+            (name, raw_values.get(name), weights.get(name, 0.0))
+            for name in source_values
+            if raw_values.get(name) is not None
+        ]
+        bands = _compute_forecast_bands(
+            final_f=round(final, 2),
+            gefs_sigma=gefs_sigma,
+            contributing_sources=contributing_sources,
+        )
+        if cap_fired:
+            inflated = round(bands["sigma_f"] * 1.5, 2)
+            bands["sigma_f"] = inflated
+            bands["p10"] = round(final - _Z_80 * inflated, 2)
+            bands["p90"] = round(final + _Z_80 * inflated, 2)
+        uncertainty = bands["sigma_f"]
+
         revision = self.storage.last_revision(target_date.isoformat(), mode) + 1 \
             if mode == "intraday" else 0
 
@@ -1221,6 +1301,11 @@ class Forecaster:
             # UPGRADE D — informational flag if |forecast - yesterday| >10°F
             # with no regime change. Never auto-corrects the forecast.
             "persistence_warning": persistence_warning,
+            # Session 6 Part 1 — probabilistic bands (p10/p50/p90)
+            # via variance decomposition. sigma_total combines GEFS
+            # member spread (initial-condition uncertainty) and
+            # across-model disagreement (model-physics uncertainty).
+            "bands": bands,
         }
 
         return {
