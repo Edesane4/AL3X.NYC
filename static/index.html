@@ -455,6 +455,8 @@
                        <span class="v" id="todayMode">—</span></div>
       <div class="row"><span class="k">Uncertainty</span>
                        <span class="v" id="todayUnc">—</span></div>
+      <div class="row"><span class="k">80% likely</span>
+                       <span class="v" id="todayBand">—</span></div>
       <div class="row"><span class="k">Last revised</span>
                        <span class="v" id="todayIssued">—</span></div>
       <div class="toolbar">
@@ -473,6 +475,8 @@
                        <span class="v" id="tomorrowRaw">—</span></div>
       <div class="row"><span class="k">Uncertainty</span>
                        <span class="v" id="tomorrowUnc">—</span></div>
+      <div class="row"><span class="k">80% likely</span>
+                       <span class="v" id="tomorrowBand">—</span></div>
       <div class="row"><span class="k">Issued</span>
                        <span class="v" id="tomorrowIssued">—</span></div>
       <div class="toolbar">
@@ -618,6 +622,11 @@ function render(state) {
     lt ? `${lt.mode.replace('_',' ')} (rev ${lt.revision})` : "—";
   document.getElementById("todayUnc").textContent =
     lt ? "±" + fmt(lt.uncertainty_f,1) + "°F" : "—";
+  const todayBand = lt && lt.extras && lt.extras.bands;
+  document.getElementById("todayBand").textContent =
+    todayBand
+      ? fmt(todayBand.p10,1) + "°F – " + fmt(todayBand.p90,1) + "°F"
+      : "—";
   document.getElementById("todayIssued").textContent =
     lt ? fmtT(lt.issued_at) : "—";
 
@@ -633,6 +642,11 @@ function render(state) {
       fmt(tm.raw_ensemble_f,1) + "°F";
     document.getElementById("tomorrowUnc").textContent =
       "±" + fmt(tm.uncertainty_f,1) + "°F";
+    const tomorrowBand = tm.extras && tm.extras.bands;
+    document.getElementById("tomorrowBand").textContent =
+      tomorrowBand
+        ? fmt(tomorrowBand.p10,1) + "°F – " + fmt(tomorrowBand.p90,1) + "°F"
+        : "—";
     document.getElementById("tomorrowIssued").textContent =
       fmtT(tm.issued_at);
   } else {
@@ -641,6 +655,7 @@ function render(state) {
       `<span class="chip warn">night-before not yet issued</span>`;
     document.getElementById("tomorrowRaw").textContent = "—";
     document.getElementById("tomorrowUnc").textContent = "—";
+    document.getElementById("tomorrowBand").textContent = "—";
     document.getElementById("tomorrowIssued").textContent = "—";
   }
 

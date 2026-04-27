@@ -190,6 +190,15 @@ def format_forecast_for_humans(fc: dict) -> str:
         sign = "▲" if delta > 0 else ("▼" if delta < 0 else "▶")
         delta_line = f"\n{sign} Change from last update: {delta:+.1f}°F"
 
+    # Session 6 Part 2 — append a probabilistic-band subline when bands
+    # are present in extras. Older forecasts pre-Session-6 won't have
+    # bands and continue rendering only the ±X.X°F line.
+    bands = (fc.get("extras") or {}).get("bands") or {}
+    band_line = ""
+    if bands.get("p10") is not None and bands.get("p90") is not None:
+        band_line = (f"\n📏 80% likely: {bands['p10']:.1f}°F – "
+                     f"{bands['p90']:.1f}°F")
+
     running = ""
     if fc.get("running_asos_max_f") is not None:
         running = f"\n🌡 Running Central Park max so far: {fc['running_asos_max_f']:.1f}°F"
@@ -221,7 +230,8 @@ def format_forecast_for_humans(fc: dict) -> str:
         f"🗽 <b>AL3X.NYC forecast update</b>\n"
         f"Central Park high for <b>{date}</b>\n"
         f"Mode: {mode}{rev}\n\n"
-        f"🔮 <b>Forecast: {final}°F</b> (±{unc:.1f}°F){delta_line}{running}\n\n"
+        f"🔮 <b>Forecast: {final}°F</b> (±{unc:.1f}°F)"
+        f"{band_line}{delta_line}{running}\n\n"
         f"📊 <b>Ensemble</b>\n{src_block}\n"
         f"Raw ensemble: {fc['raw_ensemble_f']:.1f}°F\n\n"
         f"🛠 <b>NYC adjustments</b> (total {total:+.1f}°F)\n{corr_block}"
