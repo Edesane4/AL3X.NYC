@@ -37,7 +37,12 @@ def main() -> int:
         else:
             written += 1
 
-    print(f"Wrote {written}, skipped {skipped} (no forecast found).")
+    nb_filled = conn.execute(
+        "SELECT COUNT(*) FROM calibration_records "
+        "WHERE night_before_p50_f IS NOT NULL"
+    ).fetchone()[0]
+    print(f"Wrote {written}, skipped {skipped} (no forecast found). "
+          f"Night-before populated on {nb_filled} rows.")
     return 0
 
 
