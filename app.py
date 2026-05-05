@@ -257,6 +257,216 @@ async def history(days: int = 30):
                                            key=lambda x: x["date"])})
 
 
+@app.get("/api/trajectory")
+async def trajectory():
+    """Session 7 — trajectory data for the three dashboard panels.
+
+    Returns three datasets:
+      per_source_mae    — per-source cumulative + rolling 7d MAE per
+                          verified day (anchored on the LAST forecast
+                          for each target_date so the per-source numbers
+                          stay consistent with the ensemble final number).
+      ensemble_mae      — DUAL-METRIC trajectory. For each verified day,
+                          night_before AND final error are carried, plus
+                          their cumulative + rolling MAE and inside-80
+                          rates. The honest "forecasting vs nowcasting"
+                          chart.
+      lead_time_matrix  — Per-month MAE per lead-time bucket. Buckets:
+                          night_before, pre_dawn (00-06), morning (06-12),
+                          pre_peak (12-16), post_peak (16+).
+    """
+    import sqlite3
+    import json
+    from collections import defaultdict
+    from statistics import median
+
+    db_path = os.environ.get("AL3X_DB_PATH", "al3x.db")
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    # ----- Dataset 1: per_source_mae -----
+    rows = conn.execute("""
+        SELECT c.target_date, c.realized_high_f,
+               (SELECT f.sources_json FROM forecasts f
+                 WHERE f.target_date = c.target_date
+                 ORDER BY f.id DESC LIMIT 1) AS sources_json
+          FROM calibration_records c
+         ORDER BY c.target_date ASC
+    """).fetchall()
+
+    per_source_errors: dict = defaultdict(list)
+    for r in rows:
+        if not r["sources_json"]:
+            continue
+        try:
+            srcs = json.loads(r["sources_json"])
+        except json.JSONDecodeError:
+            continue
+        for name, payload in srcs.items():
+            if not isinstance(payload, dict):
+                continue
+            v = payload.get("value")
+            if v is None:
+                continue
+            err = abs(float(r["realized_high_f"]) - float(v))
+            per_source_errors[name].append((r["target_date"], err))
+
+    per_source_mae = []
+    for name, day_errors in per_source_errors.items():
+        day_errors.sort()
+        cumulative_sum = 0.0
+        for i, (date, err) in enumerate(day_errors):
+            cumulative_sum += err
+            cumulative_mae = round(cumulative_sum / (i + 1), 3)
+            window = day_errors[max(0, i - 6):i + 1]
+            rolling_mae = round(sum(e for _, e in window) / len(window), 3)
+            per_source_mae.append({
+                "source": name,
+                "target_date": date,
+                "cumulative_mae_f": cumulative_mae,
+                "rolling_7d_mae_f": rolling_mae,
+                "n_days": i + 1,
+            })
+
+    # ----- Dataset 2: ensemble_mae (dual-metric) -----
+    rows2 = conn.execute("""
+        SELECT target_date, realized_high_f,
+               forecast_p50_f, inside_80,
+               night_before_p50_f, night_before_inside_80
+          FROM calibration_records
+         ORDER BY target_date ASC
+    """).fetchall()
+
+    def _mae(vals):
+        return round(sum(vals) / len(vals), 3) if vals else None
+
+    def _rolling(vals, k=7):
+        window = vals[-k:]
+        return round(sum(window) / len(window), 3) if window else None
+
+    ensemble_mae = []
+    final_errs = []
+    nb_errs = []
+    final_inside_count = 0
+    nb_inside_count = 0
+    final_total = 0
+    nb_total = 0
+    for r in rows2:
+        truth = float(r["realized_high_f"])
+
+        final_err = (abs(truth - float(r["forecast_p50_f"]))
+                     if r["forecast_p50_f"] is not None else None)
+        if final_err is not None:
+            final_errs.append(final_err)
+            final_total += 1
+            if r["inside_80"]:
+                final_inside_count += 1
+
+        nb_err = (abs(truth - float(r["night_before_p50_f"]))
+                  if r["night_before_p50_f"] is not None else None)
+        if nb_err is not None:
+            nb_errs.append(nb_err)
+            nb_total += 1
+            if r["night_before_inside_80"]:
+                nb_inside_count += 1
+
+        ensemble_mae.append({
+            "target_date": r["target_date"],
+            "realized_high_f": truth,
+            "final_error_f": round(final_err, 3) if final_err is not None else None,
+            "final_mae_cumulative_f": _mae(final_errs),
+            "final_mae_rolling_7d_f": _rolling(final_errs),
+            "final_inside_80_rate": (round(final_inside_count / final_total, 3)
+                                     if final_total else None),
+            "night_before_error_f": round(nb_err, 3) if nb_err is not None else None,
+            "night_before_mae_cumulative_f": _mae(nb_errs),
+            "night_before_mae_rolling_7d_f": _rolling(nb_errs),
+            "night_before_inside_80_rate": (round(nb_inside_count / nb_total, 3)
+                                            if nb_total else None),
+        })
+
+    # ----- Dataset 3: lead_time_matrix -----
+    bucket_rows = conn.execute("""
+        SELECT
+          c.target_date,
+          c.realized_high_f,
+          f.mode,
+          f.final_f,
+          f.issued_at
+        FROM calibration_records c
+        JOIN forecasts f ON f.target_date = c.target_date
+        ORDER BY c.target_date ASC, f.issued_at ASC
+    """).fetchall()
+
+    def _bucket(mode, issued_at, target_date):
+        if mode == "night_before":
+            return "night_before"
+        try:
+            issued_date = issued_at[:10]
+            issued_hour = int(issued_at[11:13])
+        except (ValueError, IndexError):
+            return "post_peak"
+        if issued_date < target_date:
+            return "night_before"
+        if 0 <= issued_hour < 6:
+            return "pre_dawn"
+        if 6 <= issued_hour < 12:
+            return "morning"
+        if 12 <= issued_hour < 16:
+            return "pre_peak"
+        return "post_peak"
+
+    by_day_bucket: dict = defaultdict(list)
+    realized: dict = {}
+    for r in bucket_rows:
+        td = r["target_date"]
+        realized[td] = float(r["realized_high_f"])
+        b = _bucket(r["mode"], r["issued_at"], td)
+        by_day_bucket[(td, b)].append(float(r["final_f"]))
+
+    by_month_bucket: dict = defaultdict(list)
+    for (td, b), vals in by_day_bucket.items():
+        if td not in realized:
+            continue
+        med = median(vals)
+        err = abs(med - realized[td])
+        month = td[:7]
+        by_month_bucket[(month, b)].append(err)
+
+    BUCKETS = ["night_before", "pre_dawn", "morning", "pre_peak", "post_peak"]
+    months_seen = sorted({m for (m, _) in by_month_bucket.keys()})
+    lead_time_matrix = []
+    for month in months_seen:
+        row = {"month": month}
+        for b in BUCKETS:
+            errs = by_month_bucket.get((month, b), [])
+            row[b] = {
+                "mae_f": round(sum(errs) / len(errs), 3) if errs else None,
+                "n_days": len(errs),
+            }
+        lead_time_matrix.append(row)
+
+    conn.close()
+
+    return {
+        "per_source_mae": per_source_mae,
+        "ensemble_mae": ensemble_mae,
+        "lead_time_matrix": lead_time_matrix,
+        "buckets": BUCKETS,
+        "headline": {
+            "verified_days": len(rows2),
+            "final_mae_cumulative_f": _mae(final_errs),
+            "final_mae_rolling_7d_f": _rolling(final_errs),
+            "night_before_mae_cumulative_f": _mae(nb_errs),
+            "night_before_mae_rolling_7d_f": _rolling(nb_errs),
+            "final_inside_80_rate": (round(final_inside_count / final_total, 3)
+                                     if final_total else None),
+            "night_before_inside_80_rate": (round(nb_inside_count / nb_total, 3)
+                                            if nb_total else None),
+        },
+    }
+
+
 @app.post("/api/force/night_before")
 async def force_night_before():
     # BUG 2 — manual API triggers must bypass the 3-run cap
