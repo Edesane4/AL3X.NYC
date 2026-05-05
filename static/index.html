@@ -366,6 +366,9 @@
   }
   .regime-narr strong { color: var(--accent); font-weight: 600; }
 </style>
+<!-- Session 7 Part 3 — Chart.js for trajectory panels -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-chart-matrix@2.0.1/dist/chartjs-chart-matrix.min.js"></script>
 </head>
 <body>
 <header>
@@ -523,6 +526,32 @@
     <h2>Forecast revisions</h2>
     <div class="log" id="timeline" style="max-height:260px">
       <div class="empty">No forecasts yet.</div>
+    </div>
+  </section>
+
+  <!-- Session 7 Part 3 — Trajectory panels -->
+  <section id="trajectory-panels" style="margin-top: 2rem;">
+    <h2 style="margin-bottom: 0.5rem;">Trajectory: is the agent getting smarter?</h2>
+    <div id="trajectory-headline" style="margin-bottom: 1rem; font-family: monospace; font-size: 0.85rem; line-height: 1.5;"></div>
+
+    <div style="margin-bottom: 1.5rem;">
+      <h3 style="margin: 0.25rem 0;">Panel 1 — Per-source cumulative MAE</h3>
+      <canvas id="chart-per-source" height="120"></canvas>
+    </div>
+
+    <div style="margin-bottom: 1.5rem;">
+      <h3 style="margin: 0.25rem 0;">Panel 2 — Ensemble MAE: night-before vs final</h3>
+      <p style="margin: 0.25rem 0; color: var(--muted, #666); font-size: 0.85rem;">
+        Night-before is real forecasting (~18-20h before peak).
+        Final includes intraday revisions after the peak has happened.
+        The gap between them is the value of nowcasting.
+      </p>
+      <canvas id="chart-ensemble" height="120"></canvas>
+    </div>
+
+    <div>
+      <h3 style="margin: 0.25rem 0;">Panel 3 — Lead-time MAE matrix (by month)</h3>
+      <canvas id="chart-leadtime" height="100"></canvas>
     </div>
   </section>
 </main>
@@ -997,6 +1026,176 @@ update();
 setInterval(update, 10_000);
 setInterval(() => document.getElementById("clock").textContent =
   new Date().toLocaleTimeString("en-US"), 1000);
+
+// Session 7 Part 3 — trajectory panels (loaded once on page load).
+(async function loadTrajectory() {
+  let data;
+  try {
+    const res = await fetch('/api/trajectory');
+    data = await res.json();
+  } catch (e) {
+    document.getElementById('trajectory-headline').textContent =
+      'trajectory data unavailable';
+    return;
+  }
+
+  const h = data.headline;
+  const ff = (v) => v == null ? 'n/a' : (+v).toFixed(2) + '°F';
+  const pct = (v) => v == null ? 'n/a' : Math.round(v * 100) + '%';
+  document.getElementById('trajectory-headline').innerHTML =
+    `Verified days: <b>${h.verified_days}</b> · ` +
+    `Night-before MAE: cum <b>${ff(h.night_before_mae_cumulative_f)}</b>, ` +
+    `7d <b>${ff(h.night_before_mae_rolling_7d_f)}</b>, ` +
+    `inside-80 <b>${pct(h.night_before_inside_80_rate)}</b><br>` +
+    `Final MAE: cum <b>${ff(h.final_mae_cumulative_f)}</b>, ` +
+    `7d <b>${ff(h.final_mae_rolling_7d_f)}</b>, ` +
+    `inside-80 <b>${pct(h.final_inside_80_rate)}</b> · ` +
+    `Target: ≤0.50°F`;
+
+  // Panel 1: per-source cumulative MAE
+  const sources = [...new Set(data.per_source_mae.map(r => r.source))].sort();
+  const palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                   '#8c564b', '#e377c2', '#17becf'];
+  const datesP1 = [...new Set(data.per_source_mae.map(r => r.target_date))].sort();
+  const datasetsP1 = sources.map((src, i) => {
+    const byDate = Object.fromEntries(
+      data.per_source_mae.filter(r => r.source === src)
+                          .map(r => [r.target_date, r.cumulative_mae_f])
+    );
+    return {
+      label: src,
+      data: datesP1.map(d => byDate[d] ?? null),
+      borderColor: palette[i % palette.length],
+      backgroundColor: palette[i % palette.length],
+      tension: 0.2,
+      spanGaps: true,
+      pointRadius: 2,
+    };
+  });
+  if (datesP1.length > 0) {
+    new Chart(document.getElementById('chart-per-source'), {
+      type: 'line',
+      data: { labels: datesP1, datasets: datasetsP1 },
+      options: {
+        scales: { y: { title: { display: true, text: 'Cumulative MAE (°F)' }, beginAtZero: true } },
+        plugins: { legend: { position: 'bottom' } },
+      },
+    });
+  }
+
+  // Panel 2: ensemble dual-line + reference
+  const datesP2 = data.ensemble_mae.map(r => r.target_date);
+  if (datesP2.length > 0) {
+    new Chart(document.getElementById('chart-ensemble'), {
+      type: 'line',
+      data: {
+        labels: datesP2,
+        datasets: [
+          {
+            label: 'Night-before MAE (cumulative)',
+            data: data.ensemble_mae.map(r => r.night_before_mae_cumulative_f),
+            borderColor: '#d62728', backgroundColor: '#d62728',
+            tension: 0.2, spanGaps: true, pointRadius: 2,
+          },
+          {
+            label: 'Night-before MAE (rolling 7d)',
+            data: data.ensemble_mae.map(r => r.night_before_mae_rolling_7d_f),
+            borderColor: '#d62728', backgroundColor: '#d62728',
+            borderDash: [4, 4], tension: 0.2, spanGaps: true, pointRadius: 1,
+          },
+          {
+            label: 'Final MAE (cumulative)',
+            data: data.ensemble_mae.map(r => r.final_mae_cumulative_f),
+            borderColor: '#2ca02c', backgroundColor: '#2ca02c',
+            tension: 0.2, spanGaps: true, pointRadius: 2,
+          },
+          {
+            label: 'Final MAE (rolling 7d)',
+            data: data.ensemble_mae.map(r => r.final_mae_rolling_7d_f),
+            borderColor: '#2ca02c', backgroundColor: '#2ca02c',
+            borderDash: [4, 4], tension: 0.2, spanGaps: true, pointRadius: 1,
+          },
+          {
+            label: 'Target: 0.5°F',
+            data: datesP2.map(() => 0.5),
+            borderColor: '#888', borderWidth: 1,
+            borderDash: [2, 6], pointRadius: 0, fill: false,
+          },
+        ],
+      },
+      options: {
+        scales: { y: { title: { display: true, text: 'MAE (°F)' }, beginAtZero: true } },
+        plugins: { legend: { position: 'bottom' } },
+      },
+    });
+  }
+
+  // Panel 3: lead-time matrix heatmap
+  const matrixData = [];
+  data.lead_time_matrix.forEach((row) => {
+    data.buckets.forEach((bucket) => {
+      matrixData.push({
+        x: bucket,
+        y: row.month,
+        v: row[bucket]?.mae_f,
+        n: row[bucket]?.n_days,
+      });
+    });
+  });
+
+  if (matrixData.length > 0) {
+    const maxMae = Math.max(...matrixData.filter(d => d.v != null).map(d => d.v), 5);
+    const colorScale = (v) => {
+      if (v == null) return 'rgba(200,200,200,0.3)';
+      const t = Math.min(1, v / maxMae);
+      if (t < 0.5) {
+        const g = Math.round(200 - 100 * t * 2);
+        return `rgba(${100 + Math.round(155 * t * 2)}, ${g}, 50, 0.85)`;
+      }
+      const g = Math.round(150 - 150 * (t - 0.5) * 2);
+      return `rgba(255, ${g}, 50, 0.85)`;
+    };
+
+    new Chart(document.getElementById('chart-leadtime'), {
+      type: 'matrix',
+      data: {
+        datasets: [{
+          label: 'Lead-time MAE (°F)',
+          data: matrixData,
+          backgroundColor: (ctx) => colorScale(ctx.raw.v),
+          borderColor: '#fff',
+          borderWidth: 1,
+          width: ({ chart }) => (chart.chartArea || {}).width / data.buckets.length - 4,
+          height: ({ chart }) => (chart.chartArea || {}).height / data.lead_time_matrix.length - 4,
+        }],
+      },
+      options: {
+        scales: {
+          x: { type: 'category', labels: data.buckets,
+               title: { display: true, text: 'Lead time' },
+               ticks: { autoSkip: false } },
+          y: { type: 'category',
+               labels: data.lead_time_matrix.map(r => r.month).reverse(),
+               title: { display: true, text: 'Month' },
+               reverse: true },
+        },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              title: () => '',
+              label: (ctx) => {
+                const v = ctx.raw.v;
+                const n = ctx.raw.n;
+                return `${ctx.raw.y} ${ctx.raw.x}: ${v == null ? 'no data' : v.toFixed(2) + '°F'} (n=${n})`;
+              },
+            },
+          },
+        },
+      },
+    });
+  }
+})();
 </script>
 </body>
 </html>
