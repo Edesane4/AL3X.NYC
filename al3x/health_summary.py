@@ -480,6 +480,13 @@ def _cold_start(
 
     k_samples = int(kalman_info.get("samples") or 0)
 
+    # Session 8 Part 2 — surface verified-day progress as the QRF
+    # gating metric. The historical qrf_cal.samples value (training
+    # pair count) reads as misleadingly "0" until the threshold is
+    # crossed; verified-day count is what users intuitively expect
+    # to see ticking up.
+    qrf_progress = min(30, nb_n + in_n)
+
     def _block(needed: int, have: int) -> Dict[str, Any]:
         progress = min(100, round(have / needed * 100)) if needed > 0 else 100
         return {
@@ -492,7 +499,7 @@ def _cold_start(
     return {
         "days_scored": days_scored,
         "analog": _block(14, days_scored),
-        "qrf": _block(30, qrf_samples),
+        "qrf": _block(30, qrf_progress),
         "kalman_verified": _block(14, k_samples),
     }
 

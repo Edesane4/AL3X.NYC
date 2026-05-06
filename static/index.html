@@ -466,6 +466,31 @@
         <button onclick="force('intraday')">Force intraday refresh</button>
         <button onclick="force('cli_check')">Poll CLI now</button>
       </div>
+      <!-- Session 8 Part 2 — NWS comparison card -->
+      <div class="nws-card" style="margin-top: 0.75rem; padding: 0.75rem 1rem;
+                                    background: rgba(255,255,255,0.03);
+                                    border-radius: 8px;
+                                    border: 1px solid rgba(255,255,255,0.06);">
+        <div style="display: flex; justify-content: space-between;
+                    align-items: baseline; gap: 1rem;">
+          <div>
+            <div style="font-size: 0.7rem; color: var(--muted, #888);
+                        text-transform: uppercase; letter-spacing: 0.05em;">
+              weather.gov NWS forecast
+            </div>
+            <div id="nwsToday" style="font-size: 1.4rem; font-weight: 600;
+                                       margin-top: 0.25rem;">—</div>
+            <div id="nwsTodayMeta" style="font-size: 0.75rem;
+                                           color: var(--muted, #888);
+                                           margin-top: 0.25rem;"></div>
+          </div>
+          <div id="nwsGap" style="font-size: 0.85rem; padding: 0.3rem 0.6rem;
+                                   border-radius: 4px;
+                                   background: rgba(150,150,150,0.15);">
+            no data
+          </div>
+        </div>
+      </div>
     </div>
     <div>
       <h2>Tomorrow — <span id="tomorrowDate">—</span></h2>
@@ -1021,9 +1046,65 @@ function renderHealth(h) {
   }
 }
 
+async function renderNwsCard() {
+  try {
+    const res = await fetch('/api/nws_official', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const today = data.today;
+    const todayEl = document.getElementById('nwsToday');
+    const metaEl = document.getElementById('nwsTodayMeta');
+    const gapEl = document.getElementById('nwsGap');
+    if (!todayEl || !metaEl || !gapEl) return;
+
+    if (!today || today.forecasted_high_f === null
+        || today.forecasted_high_f === undefined) {
+      todayEl.textContent = '—';
+      metaEl.textContent =
+        `Tracker captures: ${data.captures_last_24h || 0} in last 24h`;
+      gapEl.textContent = 'no data';
+      gapEl.style.background = 'rgba(150,150,150,0.15)';
+      return;
+    }
+
+    const nwsHigh = today.forecasted_high_f;
+    todayEl.innerHTML =
+      `${nwsHigh.toFixed(0)}<span style="font-size:0.6em;color:var(--muted)">°F</span>`;
+
+    const issued = today.nws_issued_at
+      ? new Date(today.nws_issued_at).toLocaleTimeString('en-US',
+          {hour: 'numeric', minute: '2-digit'})
+      : '—';
+    metaEl.textContent =
+      `${today.period_name || 'Today'} · NWS issued ${issued} · captures: ${data.captures_last_24h}`;
+
+    const al3xVal = parseFloat(document.getElementById('todayVal').textContent);
+    if (!isNaN(al3xVal)) {
+      const gap = Math.abs(al3xVal - nwsHigh);
+      const sign = al3xVal > nwsHigh ? '+' : '−';
+      let bg, label;
+      if (gap < 1.0) {
+        bg = 'rgba(50,200,80,0.2)';
+        label = `≈ AL3X (${sign}${gap.toFixed(1)}°F)`;
+      } else if (gap < 3.0) {
+        bg = 'rgba(220,180,40,0.2)';
+        label = `AL3X ${sign}${gap.toFixed(1)}°F`;
+      } else {
+        bg = 'rgba(220,80,80,0.25)';
+        label = `AL3X ${sign}${gap.toFixed(1)}°F vs NWS`;
+      }
+      gapEl.textContent = label;
+      gapEl.style.background = bg;
+    }
+  } catch (e) {
+    // Silent fail — card stays at "—"
+  }
+}
+
 async function update() {
   const st = await fetchState();
   render(st);
+  await renderNwsCard();
 }
 
 update();
