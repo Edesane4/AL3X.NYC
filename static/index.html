@@ -536,7 +536,7 @@
 
     <div style="margin-bottom: 1.5rem;">
       <h3 style="margin: 0.25rem 0;">Panel 1 — Per-source cumulative MAE</h3>
-      <canvas id="chart-per-source" height="120"></canvas>
+      <div style="position: relative; height: 320px;"><canvas id="chart-per-source"></canvas></div>
     </div>
 
     <div style="margin-bottom: 1.5rem;">
@@ -546,12 +546,12 @@
         Final includes intraday revisions after the peak has happened.
         The gap between them is the value of nowcasting.
       </p>
-      <canvas id="chart-ensemble" height="120"></canvas>
+      <div style="position: relative; height: 360px;"><canvas id="chart-ensemble"></canvas></div>
     </div>
 
     <div>
       <h3 style="margin: 0.25rem 0;">Panel 3 — Lead-time MAE matrix (by month)</h3>
-      <canvas id="chart-leadtime" height="100"></canvas>
+      <div style="position: relative; height: 280px;"><canvas id="chart-leadtime"></canvas></div>
     </div>
   </section>
 </main>
@@ -1077,6 +1077,8 @@ setInterval(() => document.getElementById("clock").textContent =
       type: 'line',
       data: { labels: datesP1, datasets: datasetsP1 },
       options: {
+        responsive: true,
+        maintainAspectRatio: false,
         scales: { y: { title: { display: true, text: 'Cumulative MAE (°F)' }, beginAtZero: true } },
         plugins: { legend: { position: 'bottom' } },
       },
@@ -1124,6 +1126,8 @@ setInterval(() => document.getElementById("clock").textContent =
         ],
       },
       options: {
+        responsive: true,
+        maintainAspectRatio: false,
         scales: { y: { title: { display: true, text: 'MAE (°F)' }, beginAtZero: true } },
         plugins: { legend: { position: 'bottom' } },
       },
@@ -1170,10 +1174,24 @@ setInterval(() => document.getElementById("clock").textContent =
         }],
       },
       options: {
+        responsive: true,
+        maintainAspectRatio: false,
         scales: {
           x: { type: 'category', labels: data.buckets,
-               title: { display: true, text: 'Lead time' },
-               ticks: { autoSkip: false } },
+               title: { display: true, text: 'Lead time (hours of day, local)' },
+               ticks: {
+                 autoSkip: false,
+                 callback: (val, idx) => {
+                   const labels = {
+                     'night_before': ['Night-before', '(18-30h out)'],
+                     'pre_dawn':     ['Pre-dawn', '(00:00–06:00)'],
+                     'morning':      ['Morning', '(06:00–12:00)'],
+                     'pre_peak':     ['Pre-peak', '(12:00–16:00)'],
+                     'post_peak':    ['Post-peak', '(after 16:00)'],
+                   };
+                   return labels[data.buckets[idx]] || data.buckets[idx];
+                 },
+               } },
           y: { type: 'category',
                labels: data.lead_time_matrix.map(r => r.month).reverse(),
                title: { display: true, text: 'Month' },
