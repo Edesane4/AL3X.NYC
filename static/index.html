@@ -466,31 +466,6 @@
         <button onclick="force('intraday')">Force intraday refresh</button>
         <button onclick="force('cli_check')">Poll CLI now</button>
       </div>
-      <!-- Session 8 Part 2 — NWS comparison card -->
-      <div class="nws-card" style="margin-top: 0.75rem; padding: 0.75rem 1rem;
-                                    background: rgba(255,255,255,0.03);
-                                    border-radius: 8px;
-                                    border: 1px solid rgba(255,255,255,0.06);">
-        <div style="display: flex; justify-content: space-between;
-                    align-items: baseline; gap: 1rem;">
-          <div>
-            <div style="font-size: 0.7rem; color: var(--muted, #888);
-                        text-transform: uppercase; letter-spacing: 0.05em;">
-              weather.gov NWS forecast
-            </div>
-            <div id="nwsToday" style="font-size: 1.4rem; font-weight: 600;
-                                       margin-top: 0.25rem;">—</div>
-            <div id="nwsTodayMeta" style="font-size: 0.75rem;
-                                           color: var(--muted, #888);
-                                           margin-top: 0.25rem;"></div>
-          </div>
-          <div id="nwsGap" style="font-size: 0.85rem; padding: 0.3rem 0.6rem;
-                                   border-radius: 4px;
-                                   background: rgba(150,150,150,0.15);">
-            no data
-          </div>
-        </div>
-      </div>
     </div>
     <div>
       <h2>Tomorrow — <span id="tomorrowDate">—</span></h2>
@@ -510,6 +485,42 @@
       <div class="toolbar">
         <button onclick="force('night_before')">Issue night-before now</button>
       </div>
+    </div>
+  </section>
+
+  <!-- Session 8 hotfix — NWS hero cards (matched layout to AL3X cards above) -->
+  <section class="card hero">
+    <div>
+      <h2>NWS Today — <span id="nwsTodayDate">—</span></h2>
+      <div class="bigtemp" id="nwsTodayTemp">
+        <div class="val" id="nwsTodayVal">—</div>
+        <div class="unit">°F</div>
+      </div>
+      <div class="meta" id="nwsTodayMeta"></div>
+      <div class="row"><span class="k">Period</span>
+                       <span class="v" id="nwsTodayPeriod">—</span></div>
+      <div class="row"><span class="k">NWS issued</span>
+                       <span class="v" id="nwsTodayIssued">—</span></div>
+      <div class="row"><span class="k">Captures (24h)</span>
+                       <span class="v" id="nwsTodayCaptures">—</span></div>
+      <div class="row"><span class="k">vs AL3X.NYC</span>
+                       <span class="v" id="nwsTodayGap">—</span></div>
+    </div>
+    <div>
+      <h2>NWS Tomorrow — <span id="nwsTomorrowDate">—</span></h2>
+      <div class="bigtemp cool" id="nwsTomorrowTemp">
+        <div class="val" id="nwsTomorrowVal">—</div>
+        <div class="unit">°F</div>
+      </div>
+      <div class="meta" id="nwsTomorrowMeta"></div>
+      <div class="row"><span class="k">Period</span>
+                       <span class="v" id="nwsTomorrowPeriod">—</span></div>
+      <div class="row"><span class="k">NWS issued</span>
+                       <span class="v" id="nwsTomorrowIssued">—</span></div>
+      <div class="row"><span class="k">Captured at</span>
+                       <span class="v" id="nwsTomorrowCaptured">—</span></div>
+      <div class="row"><span class="k">vs AL3X.NYC</span>
+                       <span class="v" id="nwsTomorrowGap">—</span></div>
     </div>
   </section>
 
@@ -1051,53 +1062,85 @@ async function renderNwsCard() {
     const res = await fetch('/api/nws_official', { cache: 'no-store' });
     if (!res.ok) return;
     const data = await res.json();
-    const today = data.today;
-    const todayEl = document.getElementById('nwsToday');
-    const metaEl = document.getElementById('nwsTodayMeta');
-    const gapEl = document.getElementById('nwsGap');
-    if (!todayEl || !metaEl || !gapEl) return;
 
-    if (!today || today.forecasted_high_f === null
-        || today.forecasted_high_f === undefined) {
-      todayEl.textContent = '—';
-      metaEl.textContent =
-        `Tracker captures: ${data.captures_last_24h || 0} in last 24h`;
-      gapEl.textContent = 'no data';
-      gapEl.style.background = 'rgba(150,150,150,0.15)';
-      return;
-    }
+    const setVal = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = v;
+    };
 
-    const nwsHigh = today.forecasted_high_f;
-    todayEl.innerHTML =
-      `${nwsHigh.toFixed(0)}<span style="font-size:0.6em;color:var(--muted)">°F</span>`;
+    const fmtIssued = (iso) => {
+      if (!iso) return '—';
+      try {
+        return new Date(iso).toLocaleString('en-US', {
+          month: 'short', day: 'numeric',
+          hour: 'numeric', minute: '2-digit',
+        });
+      } catch { return '—'; }
+    };
 
-    const issued = today.nws_issued_at
-      ? new Date(today.nws_issued_at).toLocaleTimeString('en-US',
-          {hour: 'numeric', minute: '2-digit'})
-      : '—';
-    metaEl.textContent =
-      `${today.period_name || 'Today'} · NWS issued ${issued} · captures: ${data.captures_last_24h}`;
-
-    const al3xVal = parseFloat(document.getElementById('todayVal').textContent);
-    if (!isNaN(al3xVal)) {
-      const gap = Math.abs(al3xVal - nwsHigh);
-      const sign = al3xVal > nwsHigh ? '+' : '−';
-      let bg, label;
-      if (gap < 1.0) {
-        bg = 'rgba(50,200,80,0.2)';
-        label = `≈ AL3X (${sign}${gap.toFixed(1)}°F)`;
-      } else if (gap < 3.0) {
-        bg = 'rgba(220,180,40,0.2)';
-        label = `AL3X ${sign}${gap.toFixed(1)}°F`;
-      } else {
-        bg = 'rgba(220,80,80,0.25)';
-        label = `AL3X ${sign}${gap.toFixed(1)}°F vs NWS`;
+    const renderCard = (slot, payload, al3xElId) => {
+      const valEl = document.getElementById('nws' + slot + 'Val');
+      if (!payload || payload.forecasted_high_f === null
+                   || payload.forecasted_high_f === undefined) {
+        if (valEl) valEl.textContent = '—';
+        setVal('nws' + slot + 'Date', '—');
+        setVal('nws' + slot + 'Period', '—');
+        setVal('nws' + slot + 'Issued', '—');
+        const gapEl = document.getElementById('nws' + slot + 'Gap');
+        if (gapEl) gapEl.textContent = '—';
+        const metaEl = document.getElementById('nws' + slot + 'Meta');
+        if (metaEl) metaEl.innerHTML =
+          '<span class="chip warn">no NWS data yet</span>';
+        return;
       }
-      gapEl.textContent = label;
-      gapEl.style.background = bg;
+      const high = payload.forecasted_high_f;
+      if (valEl) valEl.textContent = Math.round(high);
+      setVal('nws' + slot + 'Date', payload.target_date || '—');
+      setVal('nws' + slot + 'Period', payload.period_name || '—');
+      setVal('nws' + slot + 'Issued', fmtIssued(payload.nws_issued_at));
+
+      // Compare to AL3X equivalent (Today vs todayVal, Tomorrow vs tomorrowVal)
+      const al3xText = (document.getElementById(al3xElId) || {}).textContent;
+      const al3xVal = parseFloat(al3xText);
+      const gapEl = document.getElementById('nws' + slot + 'Gap');
+      const metaEl = document.getElementById('nws' + slot + 'Meta');
+      if (!isNaN(al3xVal) && gapEl && metaEl) {
+        const diff = al3xVal - high;
+        const gap = Math.abs(diff);
+        const sign = diff >= 0 ? '+' : '−';
+        let chipCls;
+        if (gap < 1.0) chipCls = 'ok';
+        else if (gap < 3.0) chipCls = 'warn';
+        else chipCls = 'err';
+        gapEl.innerHTML =
+          `<span class="chip ${chipCls}">AL3X ${sign}${gap.toFixed(1)}°F</span>`;
+        metaEl.innerHTML =
+          `<span class="chip">${payload.period_name || 'Today'}</span>` +
+          (payload.is_post_rollover
+            ? '<span class="chip warn">today rolled over — last NWS value</span>'
+            : '');
+      } else if (gapEl) {
+        gapEl.textContent = '—';
+        if (metaEl) metaEl.innerHTML =
+          `<span class="chip">${payload.period_name || 'Today'}</span>`;
+      }
+    };
+
+    renderCard('Today', data.today, 'todayVal');
+    renderCard('Tomorrow', data.tomorrow, 'tomorrowVal');
+
+    // Captures-24h count + tomorrow capture timestamp (informational)
+    setVal('nwsTodayCaptures',
+      (data.captures_last_24h !== undefined && data.captures_last_24h !== null)
+        ? data.captures_last_24h + ' in last 24h'
+        : '—');
+    if (data.tomorrow && data.tomorrow.captured_at) {
+      setVal('nwsTomorrowCaptured', fmtIssued(data.tomorrow.captured_at));
+    } else {
+      setVal('nwsTomorrowCaptured', '—');
     }
   } catch (e) {
-    // Silent fail — card stays at "—"
+    // Silent fail — cards keep their previous values
   }
 }
 
