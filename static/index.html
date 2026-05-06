@@ -551,7 +551,7 @@
 
     <div>
       <h3 style="margin: 0.25rem 0;">Panel 3 — Lead-time MAE matrix (by month)</h3>
-      <div style="position: relative; height: 280px;"><canvas id="chart-leadtime"></canvas></div>
+      <div style="position: relative; height: 340px;"><canvas id="chart-leadtime"></canvas></div>
     </div>
   </section>
 </main>
@@ -1160,42 +1160,85 @@ setInterval(() => document.getElementById("clock").textContent =
       return `rgba(255, ${g}, 50, 0.85)`;
     };
 
+    // Custom plugin: render bucket label + hour range + MAE value
+    // INSIDE each cell. This avoids the axis-label overlap problem and
+    // renders identically on phone and desktop (no responsive collapse).
+    const cellLabels = {
+      'night_before': ['Night-before', '18-30h out'],
+      'pre_dawn':     ['Pre-dawn',     '00:00 – 06:00'],
+      'morning':      ['Morning',      '06:00 – 12:00'],
+      'pre_peak':     ['Pre-peak',     '12:00 – 16:00'],
+      'post_peak':    ['Post-peak',    'after 16:00'],
+    };
+
+    const inCellLabelsPlugin = {
+      id: 'inCellLabels',
+      afterDatasetDraw(chart) {
+        const { ctx } = chart;
+        const meta = chart.getDatasetMeta(0);
+        meta.data.forEach((cell) => {
+          const raw = cell.raw || cell.$context?.raw;
+          if (!raw) return;
+          const x = cell.x, y = cell.y;
+          const w = cell.width, h = cell.height;
+          const labels = cellLabels[raw.x] || [raw.x, ''];
+
+          ctx.save();
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = 'rgba(0,0,0,0.85)';
+
+          // Primary label (bucket name) — slightly larger
+          ctx.font = '600 12px system-ui, -apple-system, sans-serif';
+          ctx.fillText(labels[0], x, y - h * 0.20);
+
+          // Secondary label (hour range) — smaller, lighter
+          ctx.font = '11px system-ui, -apple-system, sans-serif';
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillText(labels[1], x, y - h * 0.02);
+
+          // MAE value in the cell — bold, bottom area
+          if (raw.v != null) {
+            ctx.font = '700 13px system-ui, -apple-system, sans-serif';
+            ctx.fillStyle = 'rgba(0,0,0,0.90)';
+            ctx.fillText(raw.v.toFixed(2) + '°F', x, y + h * 0.22);
+          } else {
+            ctx.font = 'italic 11px system-ui, -apple-system, sans-serif';
+            ctx.fillStyle = 'rgba(0,0,0,0.45)';
+            ctx.fillText('no data', x, y + h * 0.22);
+          }
+
+          ctx.restore();
+        });
+      },
+    };
+
     new Chart(document.getElementById('chart-leadtime'), {
       type: 'matrix',
+      plugins: [inCellLabelsPlugin],
       data: {
         datasets: [{
           label: 'Lead-time MAE (°F)',
           data: matrixData,
           backgroundColor: (ctx) => colorScale(ctx.raw.v),
-          borderColor: '#fff',
+          borderColor: 'rgba(255,255,255,0.15)',
           borderWidth: 1,
-          width: ({ chart }) => (chart.chartArea || {}).width / data.buckets.length - 4,
-          height: ({ chart }) => (chart.chartArea || {}).height / data.lead_time_matrix.length - 4,
+          width: ({ chart }) => (chart.chartArea || {}).width / data.buckets.length - 6,
+          height: ({ chart }) => (chart.chartArea || {}).height / data.lead_time_matrix.length - 6,
         }],
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        layout: { padding: { left: 4, right: 4, top: 4, bottom: 4 } },
         scales: {
           x: { type: 'category', labels: data.buckets,
-               title: { display: true, text: 'Lead time (hours of day, local)' },
-               ticks: {
-                 autoSkip: false,
-                 callback: (val, idx) => {
-                   const labels = {
-                     'night_before': ['Night-before', '(18-30h out)'],
-                     'pre_dawn':     ['Pre-dawn', '(00:00–06:00)'],
-                     'morning':      ['Morning', '(06:00–12:00)'],
-                     'pre_peak':     ['Pre-peak', '(12:00–16:00)'],
-                     'post_peak':    ['Post-peak', '(after 16:00)'],
-                   };
-                   return labels[data.buckets[idx]] || data.buckets[idx];
-                 },
-               } },
+               display: false },  // labels rendered in-cell by plugin instead
           y: { type: 'category',
                labels: data.lead_time_matrix.map(r => r.month).reverse(),
                title: { display: true, text: 'Month' },
-               reverse: true },
+               reverse: true,
+               grid: { display: false } },
         },
         plugins: {
           legend: { display: false },
