@@ -467,6 +467,42 @@ async def trajectory():
     }
 
 
+@app.get("/api/nws_official")
+async def nws_official():
+    """Session 8 Part 2 — latest weather.gov NWS official-forecast captures.
+
+    Used by the dashboard's NWS comparison card, sourced from the
+    independent tracker that runs every 30 minutes.
+    """
+    import sqlite3
+    from al3x.nws_official_tracker import latest_for_target, ensure_schema
+
+    db_path = os.environ.get("AL3X_DB_PATH", str(BASE / "al3x.db"))
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_schema(conn)
+
+        now = datetime.now(cfg.EASTERN)
+        today_str = now.strftime("%Y-%m-%d")
+        tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        today_nws = latest_for_target(conn, today_str)
+        tomorrow_nws = latest_for_target(conn, tomorrow_str)
+
+        capture_count_24h = conn.execute(
+            """SELECT COUNT(*) FROM nws_official_forecasts
+               WHERE captured_at > datetime('now', '-24 hours')"""
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    return {
+        "today": today_nws,
+        "tomorrow": tomorrow_nws,
+        "captures_last_24h": capture_count_24h,
+    }
+
+
 @app.post("/api/force/night_before")
 async def force_night_before():
     # BUG 2 — manual API triggers must bypass the 3-run cap

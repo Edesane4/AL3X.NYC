@@ -326,6 +326,41 @@ def test_bet_scorecard_verdict_bands():
 # Test 6 — empty state                                                        #
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Session 8 Part 2 — QRF cold-start surfaces verified-day progress            #
+# --------------------------------------------------------------------------- #
+
+def test_cold_start_qrf_shows_verified_days_not_training_pairs():
+    """The QRF cold-start block reports verified-day progress
+    (night_before + intraday samples) rather than the internal QRF
+    training-pair count, which reads as misleadingly '0' until the
+    threshold is crossed."""
+    from al3x.health_summary import _cold_start
+
+    stats = {"samples": {"night_before": 12, "intraday": 10}}
+    qrf_cal = {"samples": 0}
+    kalman_info = {}
+
+    result = _cold_start(stats, qrf_cal, kalman_info)
+    qrf_block = result.get("qrf", {})
+
+    assert qrf_block.get("have") == 22
+    assert qrf_block.get("needed") == 30
+    assert qrf_block.get("unlocks_in_days") == 8
+
+
+def test_cold_start_qrf_caps_at_30():
+    """Once verified-day count exceeds threshold, QRF block reads as
+    fully unlocked (have=30, unlocks_in=0)."""
+    from al3x.health_summary import _cold_start
+
+    stats = {"samples": {"night_before": 25, "intraday": 25}}
+    result = _cold_start(stats, {"samples": 0}, {})
+    qrf_block = result.get("qrf", {})
+    assert qrf_block.get("have") == 30
+    assert qrf_block.get("unlocks_in_days") == 0
+
+
 def test_empty_state_does_not_crash():
     h = build_health_summary({})
     assert isinstance(h, dict)
