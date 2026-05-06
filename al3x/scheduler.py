@@ -167,6 +167,18 @@ class AgentScheduler:
             CronTrigger(hour=0, minute=1, timezone=str(cfg.EASTERN)),
             id="reset_daily_pnl",
         )
+        # Session 8 — independent NWS official-forecast tracker. Hits
+        # weather.gov's gridpoint forecast endpoint every 30 minutes
+        # and stores results in nws_official_forecasts. Completely
+        # separate from the existing 'nws_point' source in
+        # data_sources.py; this is the apples-to-apples comparison
+        # baseline for AL3X-vs-NWS analysis.
+        self.scheduler.add_job(
+            self._safe(self.nws_official_tracker_cycle),
+            IntervalTrigger(minutes=30, jitter=60),
+            id="nws_official_tracker",
+            next_run_time=datetime.now(cfg.EASTERN) + timedelta(seconds=30),
+        )
         self.scheduler.start()
         log.info("AL3X.NYC scheduler started (all jobs armed).")
 
@@ -707,6 +719,21 @@ class AgentScheduler:
             write_daily_checkin(content["obsidian"], content["target_date"])
         except Exception as e:  # noqa: BLE001
             log.info("obsidian daily check-in skipped: %s", e)
+
+    async def nws_official_tracker_cycle(self) -> None:
+        """Session 8 — fetch weather.gov NWS forecast and store in
+        nws_official_forecasts. Independent of forecast cycle.
+        """
+        try:
+            import httpx
+            from .nws_official_tracker import fetch_and_store
+            with self.storage._conn() as conn:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    result = await fetch_and_store(conn, client)
+            if result.get("status") != "ok":
+                log.info("nws_official_tracker: %s", result)
+        except Exception as e:  # noqa: BLE001
+            log.warning("nws_official_tracker cycle error: %s", e)
 
     async def reset_daily_pnl(self) -> None:
         """Reset daily_pnl to 0.0 at midnight so CB1 does not
