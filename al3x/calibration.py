@@ -38,9 +38,29 @@ CREATE INDEX IF NOT EXISTS idx_calibration_target_date
     ON calibration_records(target_date);
 """
 
+# Session 7 Part 1 — additive migration. ALTER TABLE in SQLite is
+# limited (no IF NOT EXISTS for ADD COLUMN), so we probe pragma_table_info
+# and add only the missing columns. Idempotent across restarts.
+_NIGHT_BEFORE_COLUMNS = [
+    ("night_before_forecast_id", "INTEGER"),
+    ("night_before_p50_f", "REAL"),
+    ("night_before_p10_f", "REAL"),
+    ("night_before_p90_f", "REAL"),
+    ("night_before_sigma_f", "REAL"),
+    ("night_before_inside_80", "INTEGER"),
+    ("night_before_error_signed_f", "REAL"),
+]
+
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(_SCHEMA_SQL)
+    existing = {row[1] for row in conn.execute(
+        "PRAGMA table_info(calibration_records)").fetchall()}
+    for name, col_type in _NIGHT_BEFORE_COLUMNS:
+        if name not in existing:
+            conn.execute(
+                f"ALTER TABLE calibration_records ADD COLUMN {name} {col_type}"
+            )
     conn.commit()
 
 
@@ -70,6 +90,38 @@ def _last_forecast_for_date(conn: sqlite3.Connection, target_date: str
          LIMIT 1
         """,
         (target_date, target_date),
+    ).fetchone()
+    return row
+
+
+def _first_night_before_forecast_for_date(conn: sqlite3.Connection,
+                                          target_date: str
+                                          ) -> Optional[tuple]:
+    """Return (id, extras_json, final_f, uncertainty_f) for the FIRST
+    night_before forecast issued for target_date.
+
+    This is the agent's earliest committed forecast — typically issued
+    ~18-20 hours before peak temperature on the day prior. Returns None
+    if no night_before forecast exists, or if the schema lacks the mode
+    column (older test fixtures).
+    """
+    cols = {row[1] for row in conn.execute(
+        "PRAGMA table_info(forecasts)").fetchall()}
+    if "mode" not in cols:
+        return None
+    final_expr = "final_f" if "final_f" in cols else "NULL AS final_f"
+    unc_expr = ("uncertainty_f" if "uncertainty_f" in cols
+                else "NULL AS uncertainty_f")
+    row = conn.execute(
+        f"""
+        SELECT id, extras_json, {final_expr}, {unc_expr}
+          FROM forecasts
+         WHERE target_date = ?
+           AND mode = 'night_before'
+         ORDER BY issued_at ASC
+         LIMIT 1
+        """,
+        (target_date,),
     ).fetchone()
     return row
 
@@ -128,6 +180,53 @@ def record_calibration(conn: sqlite3.Connection, target_date: str,
         inside_80 = 1 if (p10 <= realized_high_f <= p90) else 0
         error_signed = realized_high_f - p50
 
+    # Session 7 Part 1 — compute the same metrics for the FIRST
+    # night_before forecast (the honest forecasting metric, vs the
+    # final metric above which is post-peak nowcasting).
+    nb_fc = _first_night_before_forecast_for_date(conn, target_date)
+    nb_forecast_id = None
+    nb_p10 = nb_p50 = nb_p90 = nb_sigma = None
+    nb_inside_80 = None
+    nb_error_signed = None
+    if nb_fc is not None:
+        nb_forecast_id, nb_extras_raw, nb_final_f, nb_top_uncertainty_f = nb_fc
+        try:
+            nb_extras = json.loads(nb_extras_raw) if nb_extras_raw else {}
+        except json.JSONDecodeError:
+            nb_extras = {}
+
+        nb_bands = nb_extras.get("bands") or {}
+        nb_p10 = nb_bands.get("p10")
+        nb_p50 = nb_bands.get("p50")
+        nb_p90 = nb_bands.get("p90")
+        nb_sigma = nb_bands.get("sigma_f")
+
+        # Same Gaussian synthesis fallback for pre-Session-6 night_before
+        # forecasts that have uncertainty_f but no bands.
+        if nb_p10 is None or nb_p90 is None:
+            nb_u = nb_extras.get("uncertainty_f")
+            if nb_u is None:
+                nb_u = nb_top_uncertainty_f
+            nb_f = nb_extras.get("final_f")
+            if nb_f is None:
+                nb_f = nb_final_f
+            if nb_u is not None and nb_f is not None:
+                nb_p50 = float(nb_f)
+                nb_p10 = float(nb_f) - 1.2816 * float(nb_u)
+                nb_p90 = float(nb_f) + 1.2816 * float(nb_u)
+                nb_sigma = float(nb_u)
+            elif nb_f is not None:
+                # Last-resort fallback for ancient rows: point + a
+                # conservative 2°F sigma so the metric isn't omitted.
+                nb_p50 = float(nb_f)
+                nb_sigma = 2.0
+                nb_p10 = float(nb_f) - 1.2816 * 2.0
+                nb_p90 = float(nb_f) + 1.2816 * 2.0
+
+        if nb_p10 is not None and nb_p90 is not None and nb_p50 is not None:
+            nb_inside_80 = 1 if (nb_p10 <= realized_high_f <= nb_p90) else 0
+            nb_error_signed = realized_high_f - nb_p50
+
     now_iso = datetime.now(timezone.utc).isoformat()
 
     conn.execute(
@@ -136,8 +235,12 @@ def record_calibration(conn: sqlite3.Connection, target_date: str,
             (target_date, realized_high_f, forecast_id,
              forecast_p50_f, forecast_p10_f, forecast_p90_f,
              forecast_sigma_f, inside_80, error_signed_f,
+             night_before_forecast_id, night_before_p50_f,
+             night_before_p10_f, night_before_p90_f,
+             night_before_sigma_f, night_before_inside_80,
+             night_before_error_signed_f,
              recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(target_date) DO UPDATE SET
             realized_high_f = excluded.realized_high_f,
             forecast_id = excluded.forecast_id,
@@ -147,10 +250,20 @@ def record_calibration(conn: sqlite3.Connection, target_date: str,
             forecast_sigma_f = excluded.forecast_sigma_f,
             inside_80 = excluded.inside_80,
             error_signed_f = excluded.error_signed_f,
+            night_before_forecast_id = excluded.night_before_forecast_id,
+            night_before_p50_f = excluded.night_before_p50_f,
+            night_before_p10_f = excluded.night_before_p10_f,
+            night_before_p90_f = excluded.night_before_p90_f,
+            night_before_sigma_f = excluded.night_before_sigma_f,
+            night_before_inside_80 = excluded.night_before_inside_80,
+            night_before_error_signed_f = excluded.night_before_error_signed_f,
             recorded_at = excluded.recorded_at
         """,
         (target_date, realized_high_f, forecast_id,
-         p50, p10, p90, sigma, inside_80, error_signed, now_iso),
+         p50, p10, p90, sigma, inside_80, error_signed,
+         nb_forecast_id, nb_p50, nb_p10, nb_p90, nb_sigma,
+         nb_inside_80, nb_error_signed,
+         now_iso),
     )
     conn.commit()
 
@@ -161,4 +274,10 @@ def record_calibration(conn: sqlite3.Connection, target_date: str,
         "sigma_f": sigma,
         "inside_80": inside_80,
         "error_signed_f": error_signed,
+        "night_before": {
+            "p10": nb_p10, "p50": nb_p50, "p90": nb_p90,
+            "sigma_f": nb_sigma,
+            "inside_80": nb_inside_80,
+            "error_signed_f": nb_error_signed,
+        },
     }
