@@ -551,7 +551,11 @@
 
     <div>
       <h3 style="margin: 0.25rem 0;">Panel 3 — Lead-time MAE matrix (by month)</h3>
-      <div style="position: relative; height: 340px;"><canvas id="chart-leadtime"></canvas></div>
+      <p style="margin: 0.25rem 0; color: var(--muted, #888); font-size: 0.85rem;">
+        MAE per lead-time bucket per month. Greener cells are more accurate forecasts.
+        Night-before is the honest forecasting metric; post-peak is mostly nowcasting.
+      </p>
+      <div id="chart-leadtime-table" style="overflow-x: auto; margin-top: 0.5rem;"></div>
     </div>
   </section>
 </main>
@@ -1134,127 +1138,102 @@ setInterval(() => document.getElementById("clock").textContent =
     });
   }
 
-  // Panel 3: lead-time matrix heatmap
-  const matrixData = [];
-  data.lead_time_matrix.forEach((row) => {
-    data.buckets.forEach((bucket) => {
-      matrixData.push({
-        x: bucket,
-        y: row.month,
-        v: row[bucket]?.mae_f,
-        n: row[bucket]?.n_days,
-      });
-    });
-  });
+  // Panel 3: lead-time matrix as a plain HTML table.
+  // Plain tables render correctly on every viewport size and never have
+  // axis-overflow or label-clipping issues. Each cell gets:
+  //   - a background color based on MAE (green=low, yellow=mid, red=high)
+  //   - the MAE value bolded
+  //   - the sample count (n=X) underneath in muted text
+  // The header row labels each bucket with both its name and hour range.
+  const tableRoot = document.getElementById('chart-leadtime-table');
+  if (tableRoot && data.lead_time_matrix.length > 0) {
+    const bucketLabels = {
+      'night_before': { name: 'Night-before', hours: '18–30h out' },
+      'pre_dawn':     { name: 'Pre-dawn',     hours: '00:00 – 06:00' },
+      'morning':      { name: 'Morning',      hours: '06:00 – 12:00' },
+      'pre_peak':     { name: 'Pre-peak',     hours: '12:00 – 16:00' },
+      'post_peak':    { name: 'Post-peak',    hours: 'after 16:00' },
+    };
 
-  if (matrixData.length > 0) {
-    const maxMae = Math.max(...matrixData.filter(d => d.v != null).map(d => d.v), 5);
-    const colorScale = (v) => {
-      if (v == null) return 'rgba(200,200,200,0.3)';
+    const allMaes = data.lead_time_matrix.flatMap(row =>
+      data.buckets.map(b => row[b]?.mae_f).filter(v => v != null)
+    );
+    const maxMae = Math.max(...allMaes, 5);
+
+    const cellColor = (v) => {
+      if (v == null) return 'rgba(120, 120, 120, 0.20)';
       const t = Math.min(1, v / maxMae);
+      // Green (good) → yellow (mid) → red (bad)
       if (t < 0.5) {
-        const g = Math.round(200 - 100 * t * 2);
-        return `rgba(${100 + Math.round(155 * t * 2)}, ${g}, 50, 0.85)`;
+        const r = Math.round(100 + 155 * t * 2);
+        const g = Math.round(200 - 50 * t * 2);
+        return `rgba(${r}, ${g}, 60, 0.85)`;
       }
-      const g = Math.round(150 - 150 * (t - 0.5) * 2);
-      return `rgba(255, ${g}, 50, 0.85)`;
+      const r = 255;
+      const g = Math.round(150 - 100 * (t - 0.5) * 2);
+      return `rgba(${r}, ${g}, 50, 0.85)`;
     };
 
-    // Custom plugin: render bucket label + hour range + MAE value
-    // INSIDE each cell. This avoids the axis-label overlap problem and
-    // renders identically on phone and desktop (no responsive collapse).
-    const cellLabels = {
-      'night_before': ['Night-before', '18-30h out'],
-      'pre_dawn':     ['Pre-dawn',     '00:00 – 06:00'],
-      'morning':      ['Morning',      '06:00 – 12:00'],
-      'pre_peak':     ['Pre-peak',     '12:00 – 16:00'],
-      'post_peak':    ['Post-peak',    'after 16:00'],
-    };
+    // Build the header row
+    const headerCells = data.buckets.map(b => {
+      const lbl = bucketLabels[b] || { name: b, hours: '' };
+      return `<th style="padding: 0.5rem 0.4rem; text-align: center;
+                         font-weight: 600; font-size: 0.85rem;
+                         border-bottom: 1px solid rgba(255,255,255,0.1);
+                         min-width: 110px;">
+                <div>${lbl.name}</div>
+                <div style="font-weight: 400; font-size: 0.72rem;
+                            color: var(--muted, #888); margin-top: 2px;">
+                  ${lbl.hours}
+                </div>
+              </th>`;
+    }).join('');
 
-    const inCellLabelsPlugin = {
-      id: 'inCellLabels',
-      afterDatasetDraw(chart) {
-        const { ctx } = chart;
-        const meta = chart.getDatasetMeta(0);
-        meta.data.forEach((cell) => {
-          const raw = cell.raw || cell.$context?.raw;
-          if (!raw) return;
-          const x = cell.x, y = cell.y;
-          const w = cell.width, h = cell.height;
-          const labels = cellLabels[raw.x] || [raw.x, ''];
+    // Build the body rows (one per month)
+    const bodyRows = data.lead_time_matrix.map(row => {
+      const cells = data.buckets.map(b => {
+        const v = row[b]?.mae_f;
+        const n = row[b]?.n_days ?? 0;
+        const bg = cellColor(v);
+        const valText = v == null
+          ? '<span style="font-style: italic; opacity: 0.6;">no data</span>'
+          : `<strong>${v.toFixed(2)}°F</strong>`;
+        return `<td style="padding: 0.7rem 0.4rem; text-align: center;
+                           background: ${bg}; color: rgba(0,0,0,0.85);
+                           border: 1px solid rgba(0,0,0,0.10);">
+                  <div style="font-size: 0.95rem;">${valText}</div>
+                  <div style="font-size: 0.70rem; opacity: 0.65; margin-top: 2px;">
+                    n=${n}
+                  </div>
+                </td>`;
+      }).join('');
+      return `<tr>
+                <th style="padding: 0.5rem 0.7rem; text-align: right;
+                           font-weight: 600; font-size: 0.85rem;
+                           border-right: 1px solid rgba(255,255,255,0.1);
+                           white-space: nowrap;">
+                  ${row.month}
+                </th>
+                ${cells}
+              </tr>`;
+    }).join('');
 
-          ctx.save();
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillStyle = 'rgba(0,0,0,0.85)';
-
-          // Primary label (bucket name) — slightly larger
-          ctx.font = '600 12px system-ui, -apple-system, sans-serif';
-          ctx.fillText(labels[0], x, y - h * 0.20);
-
-          // Secondary label (hour range) — smaller, lighter
-          ctx.font = '11px system-ui, -apple-system, sans-serif';
-          ctx.fillStyle = 'rgba(0,0,0,0.65)';
-          ctx.fillText(labels[1], x, y - h * 0.02);
-
-          // MAE value in the cell — bold, bottom area
-          if (raw.v != null) {
-            ctx.font = '700 13px system-ui, -apple-system, sans-serif';
-            ctx.fillStyle = 'rgba(0,0,0,0.90)';
-            ctx.fillText(raw.v.toFixed(2) + '°F', x, y + h * 0.22);
-          } else {
-            ctx.font = 'italic 11px system-ui, -apple-system, sans-serif';
-            ctx.fillStyle = 'rgba(0,0,0,0.45)';
-            ctx.fillText('no data', x, y + h * 0.22);
-          }
-
-          ctx.restore();
-        });
-      },
-    };
-
-    new Chart(document.getElementById('chart-leadtime'), {
-      type: 'matrix',
-      plugins: [inCellLabelsPlugin],
-      data: {
-        datasets: [{
-          label: 'Lead-time MAE (°F)',
-          data: matrixData,
-          backgroundColor: (ctx) => colorScale(ctx.raw.v),
-          borderColor: 'rgba(255,255,255,0.15)',
-          borderWidth: 1,
-          width: ({ chart }) => (chart.chartArea || {}).width / data.buckets.length - 6,
-          height: ({ chart }) => (chart.chartArea || {}).height / data.lead_time_matrix.length - 6,
-        }],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        layout: { padding: { left: 4, right: 4, top: 4, bottom: 4 } },
-        scales: {
-          x: { type: 'category', labels: data.buckets,
-               display: false },  // labels rendered in-cell by plugin instead
-          y: { type: 'category',
-               labels: data.lead_time_matrix.map(r => r.month).reverse(),
-               title: { display: true, text: 'Month' },
-               reverse: true,
-               grid: { display: false } },
-        },
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            callbacks: {
-              title: () => '',
-              label: (ctx) => {
-                const v = ctx.raw.v;
-                const n = ctx.raw.n;
-                return `${ctx.raw.y} ${ctx.raw.x}: ${v == null ? 'no data' : v.toFixed(2) + '°F'} (n=${n})`;
-              },
-            },
-          },
-        },
-      },
-    });
+    tableRoot.innerHTML = `
+      <table style="border-collapse: separate; border-spacing: 2px;
+                    width: 100%; font-family: system-ui, -apple-system, sans-serif;">
+        <thead>
+          <tr>
+            <th style="padding: 0.5rem;"></th>
+            ${headerCells}
+          </tr>
+        </thead>
+        <tbody>
+          ${bodyRows}
+        </tbody>
+      </table>
+    `;
+  } else if (tableRoot) {
+    tableRoot.innerHTML = '<div style="opacity: 0.6;">No lead-time data yet.</div>';
   }
 })();
 </script>
