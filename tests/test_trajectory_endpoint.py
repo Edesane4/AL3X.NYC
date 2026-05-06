@@ -97,6 +97,95 @@ def test_endpoint_handles_empty_db(patched_db):
     assert result["headline"]["night_before_mae_cumulative_f"] is None
 
 
+def test_head_to_head_returns_expected_shape(patched_db):
+    """Session 8 Part 3 — /api/head_to_head returns aggregate +
+    timestamped per-forecaster lists, with MAE computed when truth
+    is verified."""
+    conn, _ = patched_db
+    # Add the NWS table — patched_db's _seed_db doesn't include it
+    # because it predates Session 8.
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS nws_official_forecasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            forecasted_high_f REAL NOT NULL,
+            source_url TEXT NOT NULL,
+            nws_issued_at TEXT,
+            period_name TEXT,
+            raw_response_excerpt TEXT
+        );
+    """)
+
+    conn.execute(
+        "INSERT INTO forecasts (issued_at, target_date, mode, final_f) "
+        "VALUES (?, ?, ?, ?)",
+        ("2026-05-05T18:00:00", "2026-05-06", "night_before", 75.0))
+    conn.execute(
+        "INSERT INTO forecasts (issued_at, target_date, mode, final_f) "
+        "VALUES (?, ?, ?, ?)",
+        ("2026-05-06T14:00:00", "2026-05-06", "intraday", 73.0))
+    conn.execute(
+        "INSERT INTO nws_official_forecasts "
+        "(captured_at, target_date, forecasted_high_f, source_url, period_name) "
+        "VALUES (?, ?, ?, ?, ?)",
+        ("2026-05-06T08:00:00", "2026-05-06", 76.0, "http://x", "Today"))
+    conn.commit()
+    record_calibration(conn, "2026-05-06", 74.0)
+
+    from app import head_to_head
+    result = asyncio.run(head_to_head(target_date="2026-05-06"))
+
+    agg = result["aggregate"]
+    assert agg["target_date"] == "2026-05-06"
+    assert agg["realized_high_f"] == 74.0
+    assert agg["al3x_count"] == 2
+    assert agg["nws_count"] == 1
+    assert "al3x_mae_f" in agg
+    assert "nws_mae_f" in agg
+    # AL3X errors: |74-75|=1, |74-73|=1 → MAE 1.0
+    assert agg["al3x_mae_f"] == 1.0
+    # NWS errors: |74-76|=2 → MAE 2.0
+    assert agg["nws_mae_f"] == 2.0
+    # Final-revision errors are last entry
+    assert agg["al3x_final_error_f"] == 1.0
+    assert agg["nws_final_error_f"] == 2.0
+    assert len(result["al3x_forecasts"]) == 2
+    assert len(result["nws_forecasts"]) == 1
+
+
+def test_head_to_head_handles_no_truth(patched_db):
+    """When the day has no calibration row yet, MAE keys are absent
+    but lists still come back."""
+    conn, _ = patched_db
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS nws_official_forecasts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            captured_at TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            forecasted_high_f REAL NOT NULL,
+            source_url TEXT NOT NULL,
+            nws_issued_at TEXT,
+            period_name TEXT,
+            raw_response_excerpt TEXT
+        );
+    """)
+    conn.execute(
+        "INSERT INTO forecasts (issued_at, target_date, mode, final_f) "
+        "VALUES (?, ?, ?, ?)",
+        ("2026-05-07T08:00:00", "2026-05-07", "intraday", 70.0))
+    conn.commit()
+
+    from app import head_to_head
+    result = asyncio.run(head_to_head(target_date="2026-05-07"))
+
+    agg = result["aggregate"]
+    assert agg["realized_high_f"] is None
+    assert agg["al3x_count"] == 1
+    assert "al3x_mae_f" not in agg
+    assert "nws_mae_f" not in agg
+
+
 def test_lead_time_buckets_classify_correctly(patched_db):
     conn, _ = patched_db
     bands = json.dumps({"bands": {"p10": 50.0, "p50": 55.0, "p90": 60.0, "sigma_f": 3.9}})

@@ -503,6 +503,92 @@ async def nws_official():
     }
 
 
+@app.get("/api/head_to_head")
+async def head_to_head(target_date: str = None):
+    """Session 8 Part 3 — timestamped AL3X vs NWS head-to-head.
+
+    For a given target_date, returns:
+      - All AL3X forecasts (issued_at, final_f, mode, hours-before-peak)
+      - All NWS official captures (captured_at, forecasted_high_f, ...)
+      - Realized truth from CLI (if verified)
+      - Aggregate MAE for each forecaster
+
+    If target_date is omitted, defaults to yesterday Eastern. No
+    dashboard panel yet — this is the data interface that future
+    analysis will read from once 5-7 days of NWS captures accumulate.
+    """
+    import sqlite3
+
+    db_path = os.environ.get("AL3X_DB_PATH", str(BASE / "al3x.db"))
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        if target_date is None:
+            yesterday = datetime.now(cfg.EASTERN) - timedelta(days=1)
+            target_date = yesterday.strftime("%Y-%m-%d")
+
+        al3x_rows = conn.execute(
+            """SELECT issued_at, final_f, mode,
+                      ROUND((julianday(? || 'T16:00:00')
+                              - julianday(issued_at)) * 24, 1)
+                        AS hours_before_peak
+                 FROM forecasts
+                WHERE target_date = ?
+                ORDER BY issued_at ASC""",
+            (target_date, target_date),
+        ).fetchall()
+
+        nws_rows = conn.execute(
+            """SELECT captured_at, forecasted_high_f, period_name,
+                      nws_issued_at,
+                      ROUND((julianday(? || 'T16:00:00')
+                              - julianday(captured_at)) * 24, 1)
+                        AS hours_before_peak
+                 FROM nws_official_forecasts
+                WHERE target_date = ?
+                ORDER BY captured_at ASC""",
+            (target_date, target_date),
+        ).fetchall()
+
+        truth_row = conn.execute(
+            "SELECT realized_high_f FROM calibration_records "
+            "WHERE target_date = ?",
+            (target_date,),
+        ).fetchone()
+        truth = float(truth_row[0]) if truth_row else None
+
+        al3x_forecasts = [dict(r) for r in al3x_rows]
+        nws_forecasts = [dict(r) for r in nws_rows]
+    finally:
+        conn.close()
+
+    aggregate = {
+        "target_date": target_date,
+        "realized_high_f": truth,
+        "al3x_count": len(al3x_forecasts),
+        "nws_count": len(nws_forecasts),
+    }
+
+    if truth is not None and al3x_forecasts:
+        al3x_errs = [abs(truth - r["final_f"]) for r in al3x_forecasts]
+        aggregate["al3x_mae_f"] = round(sum(al3x_errs) / len(al3x_errs), 3)
+        aggregate["al3x_final_error_f"] = round(
+            abs(truth - al3x_forecasts[-1]["final_f"]), 3)
+
+    if truth is not None and nws_forecasts:
+        nws_errs = [abs(truth - r["forecasted_high_f"]) for r in nws_forecasts]
+        aggregate["nws_mae_f"] = round(sum(nws_errs) / len(nws_errs), 3)
+        aggregate["nws_final_error_f"] = round(
+            abs(truth - nws_forecasts[-1]["forecasted_high_f"]), 3)
+
+    return {
+        "aggregate": aggregate,
+        "al3x_forecasts": al3x_forecasts,
+        "nws_forecasts": nws_forecasts,
+    }
+
+
 @app.post("/api/force/night_before")
 async def force_night_before():
     # BUG 2 — manual API triggers must bypass the 3-run cap
