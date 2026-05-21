@@ -1,105 +1,88 @@
-# AL3X.NYC
+# AL3X.NYC `/goals` — The Compound Machine v2
 
-**24/7 meteorological agent for the official NWS CLI recorded daily
-maximum temperature at Central Park (KNYC).**
+Four Claude Code slash commands that turn AL3X.NYC into a fully self-tuning system. Each runs autonomously and compounds results over time.
 
-AL3X.NYC pulls data from every operational model the NWS publishes for
-Central Park, blends them into a weighted ensemble, applies NYC-specific
-local-bias corrections (sea breeze, urban heat island, cloud timing,
-precipitation, inversions), verifies itself against the evening CLI
-report, and auto-tunes its own weights and bias ledger over rolling
-7/14-day windows.
+## What changed in v2
 
-* 🔭 **Night-Before forecast** issued each evening for tomorrow's high.
-* 🔁 **Intraday revisions** every 15 minutes, with a running ASOS-max
-  floor rule once Central Park starts climbing.
-* 🎯 **CLI verification** each evening between 5:30–7:30 PM ET; every
-  forecast scored, anomalies flagged.
-* 🧠 **Learning loop** — source weights and bias corrections retune
-  themselves.
-* 📲 **Telegram updates** for every new forecast plus WARNING/ERROR log
-  events from the Python process.
-* 💻 **Live HTML dashboard** with polling updates.
+`/goals autotune` supersedes the older `/goals optimize-evergreen`. v2 adds:
+- 10 parallel optimization layers (was 1 monolithic search)
+- Per-strategy, per-regime, per-time-of-day tuning
+- Forensic loss postmortems on every losing trade
+- Causal counterfactual on every promotion with auto-revert
+- A/B shadow tournament on LIVE paper trades (distribution-shift protection)
+- Pareto-frontier multi-objective optimization (Sharpe + drawdown + win rate + CVaR)
+- Strategy auto-disable/re-enable with statistical confidence
+- Pairwise source-bias learning
+- Meta-learner that biases search toward historically winning parameter directions
 
-## Quick start
+## Installation
+
+From your AL3X.NYC repo root on the Mac:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env     # fill in TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
-python app.py
+# 1. Make sure these directories exist
+mkdir -p .claude/commands al3x/learning daemon tools logs .pids configs
+
+# 2. Drop all four .md files from this package into .claude/commands/
+
+# 3. Commit
+git add .claude/commands/
+git commit -m "Add /goals compound machine v2 (autotune supersedes optimize-evergreen)"
+git push
 ```
 
-Open <http://localhost:8090> for the dashboard.
+## The four commands
 
-## Running AL3X with log persistence
-
-Always start AL3X with log redirection so overnight events (cap fires,
-regime shifts, CLI verification) survive a terminal restart:
-
-```bash
-caffeinate -is python app.py 2>&1 | tee -a al3x.log
-```
-
-`caffeinate -is` keeps the MacBook awake (and CPU available) while the
-agent runs. The `al3x.log` file grows unboundedly. Rotate manually
-when it exceeds 100 MB or implement log rotation (future work).
-
-### Telegram setup
-
-1. Message [@BotFather](https://t.me/BotFather) on Telegram, `/newbot`,
-   save the token.
-2. Start a chat with your new bot and send any message.
-3. Visit
-   `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your
-   numeric `chat.id`.
-4. Paste both values into `.env`.
-
-## How it decides
-
-| Data source | Endpoint | Role |
+| Command | Purpose | Cadence |
 |---|---|---|
-| NWS Point (hourly) | `api.weather.gov/points/.../forecast/hourly` | human-adjusted baseline + regime detection |
-| NBM (daily) | `api.weather.gov/points/.../forecast` | consensus sanity-check |
-| IEM ASOS live | `mesonet.agron.iastate.edu/.../KNYC/observations.json` | ground truth & running max floor |
-| GFS-MOS | `mdl.nws.noaa.gov/api/product/glamos/` | bias-corrected station guidance |
-| NAM-MOS | `mdl.nws.noaa.gov/api/product/nammos/` | short-range guidance |
-| HRRR (via Open-Meteo) | `api.open-meteo.com/v1/forecast?models=best_match` | 3 km high-res 0–18 h |
-| ECMWF (via Open-Meteo) | `api.open-meteo.com/v1/forecast?models=ecmwf_ifs025` | best global for day+1 |
-| NWS CLI | `forecast.weather.gov/product.php?...&product=CLI` | evening ground truth |
+| `/goals shadow-flywheel` | Paper-trade every Kalshi NYC bucket every 15 min, grade vs NWS CLI | 15-min ticks |
+| `/goals autotune` | 10-layer Optuna + forensics + A/B + Pareto. Reviews every trade, tunes every parameter. | Continuous |
+| `/goals alpha-hunt` | Auto-research literature, implement shadow sources, promote winners | Daily + Sunday evals |
+| `/goals compound` | All three in one supervised daemon. Cross-wires their outputs. | Single process, 24/7 |
 
-Default ensemble weights (Night-Before):
+## Recommended startup
+
+**Option A — All in (recommended):**
+```
+/goals compound
+```
+Single command. Walk away.
+
+**Option B — Phased rollout:**
+1. Day 1: `/goals shadow-flywheel` — get paper trades flowing
+2. Day 3: `/goals autotune` — start the 10-layer optimizer
+3. Day 7: `/goals alpha-hunt` — start finding new techniques
+4. Day 14: kill all three, then `/goals compound` to unify under supervisor
+
+## Required environment vars in `.env`
 
 ```
-HRRR         25%
-NWS Point    25%
-GFS-MOS      20%
-NAM-MOS      15%
-ECMWF        15%
+KALSHI_API_KEY=...           # read-only is fine; no live trades placed
+OBSIDIAN_VAULT_PATH=/Users/you/Obsidian/AL3X
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+ANTHROPIC_API_KEY=...          # for alpha-hunt research summaries
 ```
 
-Intraday weights dynamically shift by lead time (see
-`al3x/config.py`). NYC local-bias rules live in `al3x/forecaster.py`.
+## Migrating from v1 (if you already ran optimize-evergreen)
 
-## Performance targets
+The autotune.md slash command includes a migration block. Run `/goals autotune` and it will detect the old study and migrate trial data into the new 10-layer schema automatically.
 
-* Night-Before MAE ≤ 2.5 °F within 30 days.
-* Final Intraday MAE ≤ 1.5 °F within 30 days.
-* Zero |error| > 6 °F after 60 days (anomalies root-caused and
-  corrected).
+## Stopping
 
-## Project layout
-
+```bash
+bash tools/compound_kill.sh
 ```
-al3x/
-  config.py         # site, endpoints, default weights, bias defaults
-  data_sources.py   # async fetchers for every source
-  forecaster.py     # ensemble + NYC bias corrections
-  learning.py       # scoring, bias ledger, auto-tune
-  scheduler.py      # APScheduler cron/interval jobs
-  storage.py        # SQLite persistence
-  telegram_bot.py   # Telegram notifier + log handler
-  logging_setup.py  # pipes warnings/errors into Telegram
-static/index.html   # live dashboard
-app.py              # FastAPI entrypoint
+
+## Monitoring
+
+```bash
+python tools/compound_status.py    # full dashboard
+tail -f logs/compound.log          # raw stream
 ```
+
+Or just open today's note in Obsidian: `AL3X/Compound/{today}.md`. Scroll to the bottom for the single number that matters:
+
+> **"AL3X.NYC is +X% sharper than 30 days ago"**
+
+Trending up = the compound machine is working. Flat or negative for 60+ days = something is broken; audit.
